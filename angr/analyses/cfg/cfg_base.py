@@ -72,7 +72,6 @@ class CFGBase(Analysis):
 
         :return: None
         """
-
         self.sort = sort
         self._context_sensitivity_level=context_sensitivity_level
 

@@ -133,7 +133,6 @@ class CFGEmulated(ForwardAnalysis, CFGBase):    # pylint: disable=abstract-metho
     """
 
     tag = "CFGEmulated"
-
     def __init__(self,
                  context_sensitivity_level=1,
                  start=None,
@@ -209,6 +208,7 @@ class CFGEmulated(ForwardAnalysis, CFGBase):    # pylint: disable=abstract-metho
         :param state_add_options:                   State options that will be added to the initial state.
         :param state_remove_options:                State options that will be removed from the initial state.
         """
+
         ForwardAnalysis.__init__(self, order_jobs=True if base_graph is not None else False)
         CFGBase.__init__(self, 'emulated', context_sensitivity_level, normalize=normalize,
                          resolve_indirect_jumps=resolve_indirect_jumps,
