@@ -18,6 +18,32 @@ from .errors import AngrNoPluginError
 
 l = logging.getLogger(name=__name__)
 
+def load_trace(instruction_list, execution_trace, arch, **kwargs):
+  #open file
+  with open(instruction_list, "rb") as f:
+    ins_lst = f.read()
+  
+  with open(execution_trace, "rb") as f:
+    exe_trace = f.read()
+  
+
+  if not isinstance(arch, archinfo.Arch):
+    arch = archinfo.arch_from_id(arch)
+  
+  # Now compatible only with x86 architecture
+  if arch != archinfo.arch_amd64.ArchAMD64():
+    raise ValueError("Currently only x86_64 architecture is supported.")
+  
+  #TODO: add entry point of various images
+  return Project({'list': BytesIO(ins_lst), 'trace': BytesIO(exe_trace)},
+    main_opts= {
+      'backend': 'blob',
+      'arch': arch,
+    },
+    **kwargs
+  )
+
+
 def load_shellcode(shellcode, arch, start_offset=0, load_address=0, thumb=False, **kwargs):
     """
     Load a new project based on a snippet of assembly or bytecode.

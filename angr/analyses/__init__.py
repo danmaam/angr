@@ -6,7 +6,7 @@ def register_analysis(cls, name):
     AnalysesHub.register_default(name, cls)
 
 
-from .cfg import CFGFast, CFGEmulated, CFG, CFGArchOptions, CFGFastSoot
+from .cfg import CFGFast, CFGEmulated, CFG, CFGArchOptions, CFGFastSoot, CFGInstrace
 from .cdg import CDG
 from .ddg import DDG
 from .vfg import VFG
