@@ -34,13 +34,12 @@ def load_trace(instruction_list, arch, **kwargs):
 
 	# TODO: add entry point of various images
 	return Project(BytesIO(instruction_list),
-				   main_opts={
-		'backend': 'blob',
-		'arch': arch,
-	},
+					 main_opts={
+                        'backend': 'dyninstruction',
+                        'arch': arch,
+	                },
 		**kwargs
 	)
-
 
 def load_shellcode(shellcode, arch, start_offset=0, load_address=0, thumb=False, **kwargs):
 	"""
@@ -153,7 +152,9 @@ class Project:
 		elif hasattr(thing, 'read') and hasattr(thing, 'seek'):
 			l.info("Loading binary from stream")
 			self.filename = None
+			#load_options {'main_opts': {'backend': 'blob', 'arch': <Arch AMD64 (LE)>}}
 			self.loader = cle.Loader(thing, **load_options)
+
 			print(thing.read())
 		elif not isinstance(thing, (str, Path)) or not os.path.exists(thing) or not os.path.isfile(thing):
 			raise Exception("Not a valid binary file: %s" % repr(thing))
@@ -182,7 +183,7 @@ class Project:
 
 		if isinstance(exclude_sim_procedures_func, types.LambdaType):
 			l.warning("Passing a lambda type as the exclude_sim_procedures_func argument to "
-					  "Project causes the resulting object to be un-serializable.")
+						"Project causes the resulting object to be un-serializable.")
 
 		self._sim_procedures = {}
 
@@ -193,7 +194,7 @@ class Project:
 		if self.concrete_target and load_options.get('auto_load_libs', None):
 
 			l.critical("Incompatible options selected for this project, please disable auto_load_libs if "
-					   "you want to use a concrete target.")
+						 "you want to use a concrete target.")
 			raise Exception("Incompatible options for the project")
 
 		if self.concrete_target and self.arch.name not in ['X86', 'AMD64', 'ARMHF', 'MIPS32']:
@@ -346,7 +347,7 @@ class Project:
 				if not sim_lib.has_implementation(export.name):
 					continue
 				l.info("Using builtin SimProcedure for %s from %s",
-					   export.name, sim_lib.name)
+						 export.name, sim_lib.name)
 				self.hook_symbol(export.rebased_addr, sim_lib.get(
 					export.name, sim_proc_arch))
 
@@ -366,7 +367,7 @@ class Project:
 							export.name, sim_proc_arch))
 				else:
 					l.info("Using builtin SimProcedure for unresolved %s from %s",
-						   export.name, sim_lib.name)
+							 export.name, sim_lib.name)
 					self.hook_symbol(export.rebased_addr, sim_lib.get(
 						export.name, sim_proc_arch))
 
@@ -401,7 +402,7 @@ class Project:
 								the_lib = SIM_LIBRARIES['libstdc++.so']
 							else:
 								l.critical("Does not find any C++ library in SIM_LIBRARIES. We may not correctly "
-										   "create the stub or resolve the function prototype for name %s.", export.name)
+											 "create the stub or resolve the function prototype for name %s.", export.name)
 
 						self.hook_symbol(export.rebased_addr, the_lib.get(
 							export.name, sim_proc_arch))
@@ -508,11 +509,11 @@ class Project:
 				pass
 			elif replace is False:
 				l.warning("Address is already hooked, during hook(%s, %s). Not re-hooking.",
-						  self._addr_to_str(addr), hook)
+							self._addr_to_str(addr), hook)
 				return
 			else:
 				l.warning("Address is already hooked, during hook(%s, %s). Re-hooking.",
-						  self._addr_to_str(addr), hook)
+							self._addr_to_str(addr), hook)
 
 		if isinstance(hook, type):
 			raise TypeError(
@@ -641,7 +642,7 @@ class Project:
 			return False
 		if sym.owner is self.loader._extern_object:
 			l.warning("Refusing to unhook external symbol %s, replace it with another hook if you want to change it",
-					  symbol_name)
+						symbol_name)
 			return False
 
 		hook_addr, _ = self.simos.prepare_function_symbol(
@@ -684,11 +685,11 @@ class Project:
 		This function can be run in three different ways:
 
 				- When run with no parameters, this function begins symbolic execution
-				  from the entrypoint.
+					from the entrypoint.
 				- It can also be run with a "state" parameter specifying a SimState to
-				  begin symbolic execution from.
+					begin symbolic execution from.
 				- Finally, it can accept any arbitrary keyword arguments, which are all
-				  passed to project.factory.full_init_state.
+					passed to project.factory.full_init_state.
 
 		If symbolic execution finishes, this function returns the resulting
 		simulation manager.

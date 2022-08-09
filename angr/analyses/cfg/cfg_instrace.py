@@ -39,17 +39,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     discovered_instructions = self.project.loader._main_binary_stream
     self._md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
 
-    while True:
-      curr = discovered_instructions.read(24)
-      if (len(curr) == 0):
-        break
-      insaddr = struct.unpack("<Q", curr[0:8])
-      timestamp = struct.unpack("<Q", curr[8:16])
-      size = struct.unpack("<Q", curr[16:24])
 
-      bytecode = discovered_instructions.read(size)
-      self._add_instruction(insaddr, timestamp, bytecode)
-
+    
+    if len(self._instructions) == 0:
+      l.warning("Empty bytecode")
     # We need to load the instructions from the received trace
     if isinstance(trace, str):
       with open(trace, "rb") as f:
@@ -60,7 +53,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         
   def _add_instruction(self, address, timestamp, bytecode):
     i = list(self._md.disasm(bytecode, 0x1000))[0]
-    print("Added " + "0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
+    l.info("Added " + "0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
     self._instructions[address][timestamp] = bytecode
 
 
