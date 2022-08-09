@@ -79,3 +79,7 @@ from . import sim_manager as manager
 
 # now that we have everything loaded, re-grab the list of loggers
 loggers.load_all_loggers()
+
+# import the new cle backend
+from .trace import DynamicRecoveredInstructions
+

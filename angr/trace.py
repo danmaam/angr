@@ -1,5 +1,5 @@
-from . import Backend, register_backend
-from ..errors import CLEError
+from cle import Backend, register_backend
+from cle.errors import CLEError
 import logging
 import struct
 from collections import defaultdict
