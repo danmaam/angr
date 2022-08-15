@@ -1163,6 +1163,7 @@ class CFGEmulated(ForwardAnalysis, CFGBase):    # pylint: disable=abstract-metho
 
             self._model.add_node(block_id, cfg_node)
 
+
         else:
             # each block_id should only correspond to one CFGNode
             # use the existing CFGNode object
