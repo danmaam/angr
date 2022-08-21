@@ -354,6 +354,7 @@ class CFGModel(Serializable):
 
         predecessors = []
         for pred, _, data in self.graph.in_edges([cfgnode], data=True):
+            print(self.graph.in_edges([cfgnode], data=True))
             jk = data['jumpkind']
             if jumpkind is not None:
                 if jk == jumpkind:

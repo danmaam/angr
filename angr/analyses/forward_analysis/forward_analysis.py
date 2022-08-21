@@ -397,7 +397,7 @@ class ForwardAnalysis(Generic[AnalysisState, NodeType]):
         """
 
         job = job_info.job
-
+    
         successors = self._get_successors(job)
 
         all_new_jobs = [ ]
