@@ -13,6 +13,7 @@ from ..plugin import KnowledgeBasePlugin
 from .function import Function
 from .soot_function import SootFunction
 
+import IPython
 
 l = logging.getLogger(name=__name__)
 
@@ -85,6 +86,7 @@ class FunctionManager(KnowledgeBasePlugin, collections.abc.Mapping):
 
         # Registers used for passing arguments around
         self._arg_registers = kb._project.arch.argument_registers
+
 
     def __setstate__(self, state):
         self._kb = state["_kb"]

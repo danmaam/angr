@@ -19,6 +19,8 @@ import json
 import pyvex
 import archinfo
 
+import IPython
+
 l = logging.getLogger(name=__name__)
 class CFGInstrace(ForwardAnalysis, CFGBase):
     """
@@ -44,6 +46,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             low_priority=low_priority,
             model=model,
         )
+
+        self._state = {}
 
         #TODO: load also bytestrings
         with open(trace, "rb") as trace_stream:
@@ -94,38 +98,25 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             bytecode += self.project.loader._instruction_map[curr_ins['address']][curr_ins['timestamp']]
 
             if 'destination' in curr_ins.keys():
+                        # build the irsb, add the node to the model, create the first job
+
+                irsb = pyvex.lift(bytecode, first_address, archinfo.ArchAMD64())
+                irsb.pp()
+
+                node = CFGNode(first_address, len(bytecode), self.model, irsb=irsb)
+                self.model.add_node(node.block_id, node)
+
+                new_job = CFGJob(first_address, irsb.jumpkind, curr_ins['destination'])
+                self._insert_job(new_job)
+
                 break
+    
+        first_func = self.functions.function()
         
-        # build the irsb, add the node to the model, create the first job
-
-        irsb = pyvex.lift(bytecode, first_address, archinfo.ArchAMD64())
-
-
-
-
-        # #for tid in self._ins_trace['thread_exec_trace'].keys():
-        # basic_block_begin = None
-        # for trace in self._ins_trace['thread_exec_trace'][tid]:
-        #     if not basic_block_begin:
-        #         basic_block_begin = trace['address']
-        #         current_bytecode = b""
-        #     current_bytecode += self.project.loader._instruction_map[trace['address']][trace['timestamp']]
-        #     # we arrived at the end of a basic block 
-        #     if 'destination' in trace.keys():
-        #         irsb = pyvex.lift(current_bytecode, basic_block_begin, archinfo.ArchAMD64())
-        #         node = CFGNode(basic_block_begin, len(current_bytecode), self.model, irsb=irsb)     
-        #         self._model.add_node(node.block_id, node)
-        #         basic_block_begin = None      
-        #         # create new job for this basic block               
-
-        #         job = CFGJob(basic_block_begin, irsb.jumpkind, trace['destination'])
-        #         self._insert_job(job)
+        IPython.embed()
 
     def _job_key(self, job):
-        return job.addr       
-
-
-           
+        return job.addr           
 
     def _job_queue_empty(self) -> None:
         l.info("Job queue is empty. Stopping.")
@@ -137,6 +128,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
     def _process_job_and_get_successors(self, job_info: JobInfo) -> None:
         # per each job, creates edges in the CFG, and gets the successor(s) node 
+
+
         return
 
     # def _handle_successor(self, job: CFGJobBase, successor: SimState, successors: List[SimState]) -> List[CFGJobBase]:
@@ -151,6 +144,7 @@ class CFGJob():
                  src_stmt_idx: Optional[int]=None, returning_source=None, syscall: bool=False):
         self.addr = addr
         self.jumpkind = jumpkind
+        self.destination = destination
         self.last_addr = last_addr
         self.src_node = src_node
         self.src_ins_addr = src_ins_addr
