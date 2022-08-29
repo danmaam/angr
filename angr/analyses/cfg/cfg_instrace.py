@@ -4,11 +4,14 @@ from inspect import trace
 from sqlite3 import Timestamp
 from typing import Dict, List, Optional
 
+from sympy import false, true
+
 from .cfg_job_base import CFGJobBase
 from .cfg_base import CFGBase
 from ..forward_analysis import ForwardAnalysis
 from ...knowledge_plugins.cfg import CFGNode, MemoryDataSort, MemoryData, IndirectJump, IndirectJumpType
 from angr.analyses.forward_analysis.job_info import JobInfo
+from angr import codenode
 
 
 from ..analysis import AnalysesHub
@@ -87,6 +90,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         first_address = None
         bytecode = b""
 
+        instructions = []
+
         # construct the first basic block
 
         while True:         
@@ -95,23 +100,26 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             if first_address is None:
                 first_address = curr_ins['address']
 
-            bytecode += self.project.loader._instruction_map[curr_ins['address']][curr_ins['timestamp']]
+            instructions.append(self.project.loader._instruction_map[curr_ins['address']][curr_ins['timestamp']])
 
             if 'destination' in curr_ins.keys():
                         # build the irsb, add the node to the model, create the first job
 
+                bytecode = b''.join(instructions)   
                 irsb = pyvex.lift(bytecode, first_address, archinfo.ArchAMD64())
-                irsb.pp()
+
+                # create the current pair
+                initial = self.functions.function(addr = first_address, create = True)
+                self._current = (initial, initial.addr)
+
+                
 
                 node = CFGNode(first_address, len(bytecode), self.model, irsb=irsb)
-                self.model.add_node(node.block_id, node)
 
-                new_job = CFGJob(first_address, irsb.jumpkind, curr_ins['destination'])
+                new_job = CFGJob(first_address, node, curr_ins['destination'], instructions)
                 self._insert_job(new_job)
 
                 break
-    
-        first_func = self.functions.function()
         
         IPython.embed()
 
@@ -123,12 +131,25 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
     # to be honest, we don't have any job to be done before the job is processed
     def _pre_job_handling(self, job: CFGJobBase) -> None:
+        print("pre_job_handling")
         return
 
 
     def _process_job_and_get_successors(self, job_info: JobInfo) -> None:
         # per each job, creates edges in the CFG, and gets the successor(s) node 
 
+        # implementation of PROCESS_GROUP of CFGGrind
+        curr_instr = None
+
+        for instr in job_info.job.instructions:
+            if curr_instr:
+                assert curr_instr == instr
+            else:
+                node = self.model.find
+
+
+
+        print("process_job_successors")
 
         return
 
@@ -138,12 +159,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     #     return successors
         
 class CFGJob():
-    def __init__(self, addr: int, jumpkind: str, destination: int,
+    def __init__(self, addr: int, node: CFGNode, destination: int, instructions:List,
                  last_addr: Optional[int]=None,
                  src_node: Optional[CFGNode]=None, src_ins_addr:Optional[int]=None,
                  src_stmt_idx: Optional[int]=None, returning_source=None, syscall: bool=False):
         self.addr = addr
-        self.jumpkind = jumpkind
+        self.node = node
         self.destination = destination
         self.last_addr = last_addr
         self.src_node = src_node
@@ -151,6 +172,13 @@ class CFGJob():
         self.src_stmt_idx = src_stmt_idx
         self.returning_source = returning_source
         self.syscall = syscall
+        self.instructions = instructions
+
+class PhantomNode(CFGNode):
+    def __init__(self, addr, cfg, function_address=None):
+        super().__init__(addr, 0, cfg, simprocedure_name = None, no_ret =False, function_address=function_address, block_id = None, irsb=None, soot_block=None, instruction_addrs = None, thumb=None, byte_string=None, is_syscall=False, name=None)
+        
+
 
     
 
