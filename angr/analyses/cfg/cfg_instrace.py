@@ -91,6 +91,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         bytecode = b""
 
         instructions = []
+        instruction_info = []
 
         # construct the first basic block
 
@@ -101,6 +102,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 first_address = curr_ins['address']
 
             instructions.append(self.project.loader._instruction_map[curr_ins['address']][curr_ins['timestamp']])
+            instruction_info.append(curr_ins)
+
 
             if 'destination' in curr_ins.keys():
                         # build the irsb, add the node to the model, create the first job
@@ -116,12 +119,26 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
                 node = CFGNode(first_address, len(bytecode), self.model, irsb=irsb)
 
-                new_job = CFGJob(first_address, node, curr_ins['destination'], instructions)
+                new_job = CFGJob(first_address, node, curr_ins['destination'], instructions, instruction_info)
                 self._insert_job(new_job)
 
                 break
         
         IPython.embed()
+
+    def split_irsb(self, split_addr):
+        # assert the address of splitting is in range of the irsb
+        assert self.addr < split_addr and split_addr <= self.addr + self.size
+
+        #find the split point
+        split_idx = [idx for (idx, elem) in enumerate(self.statements) if hasattr(elem, 'addr') and elem.addr == split_addr][0]
+
+        (car, cdr) = (self.statements[:split_idx], self.statements[split_idx:])
+
+        car_irsb = self.empty_block(archinfo.ArchAMD64(), self.addr, car)
+        cdr_irsb = self.empty_block(archinfo.ArchAMD64(), split_addr, cdr, jumpkind = self.jumpkind)
+
+        return (car_irsb, cdr_irsb)
 
     def _job_key(self, job):
         return job.addr           
@@ -141,11 +158,40 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         # implementation of PROCESS_GROUP of CFGGrind
         curr_instr = None
 
-        for instr in job_info.job.instructions:
+        for instr in zip(job_info.job.instruction_info, job_info.job.instructions):
             if curr_instr:
                 assert curr_instr == instr
             else:
-                node = self.model.find
+
+                infos = instr[0]
+                bytecode = instr[1]
+
+
+                node = self.model.get_any_node(addr = infos['address'], anyaddr = True)
+
+                break
+
+                if node:
+                    if isinstance(node, PhantomNode):
+                        # CONVERT PHANTOM NODE TO NORMAL NODE
+                        continue
+                    else:
+                        #not phantom node
+                        continue
+                
+                #elif the instruction is not the leader:
+                    #split the node
+                
+                # assert first_instruction == group leader
+
+
+
+                else:
+                    #if the node isn't found
+                    continue
+
+            
+                
 
 
 
@@ -159,7 +205,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     #     return successors
         
 class CFGJob():
-    def __init__(self, addr: int, node: CFGNode, destination: int, instructions:List,
+    def __init__(self, addr: int, node: CFGNode, destination: int, instructions:List, instruction_info:List,
                  last_addr: Optional[int]=None,
                  src_node: Optional[CFGNode]=None, src_ins_addr:Optional[int]=None,
                  src_stmt_idx: Optional[int]=None, returning_source=None, syscall: bool=False):
@@ -172,6 +218,7 @@ class CFGJob():
         self.src_stmt_idx = src_stmt_idx
         self.returning_source = returning_source
         self.syscall = syscall
+        self.instruction_info = instruction_info
         self.instructions = instructions
 
 class PhantomNode(CFGNode):
