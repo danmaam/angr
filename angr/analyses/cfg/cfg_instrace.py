@@ -11,7 +11,7 @@ from .cfg_base import CFGBase
 from ..forward_analysis import ForwardAnalysis
 from ...knowledge_plugins.cfg import CFGNode, MemoryDataSort, MemoryData, IndirectJump, IndirectJumpType
 from angr.analyses.forward_analysis.job_info import JobInfo
-from angr import codenode
+from angr.codenode import CodeNode
 
 
 from ..analysis import AnalysesHub
@@ -140,6 +140,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         return (car_irsb, cdr_irsb)
 
+
     def _job_key(self, job):
         return job.addr           
 
@@ -169,18 +170,19 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
                 node = self.model.get_any_node(addr = infos['address'], anyaddr = True)
 
-                break
 
                 if node:
                     if isinstance(node, PhantomNode):
                         # CONVERT PHANTOM NODE TO NORMAL NODE
                         continue
-                    else:
-                        #not phantom node
-                        continue
-                
-                #elif the instruction is not the leader:
-                    #split the node
+                    elif node.addr != infos['address']:
+                        # split the node in the cfg
+                        (car, cdr) = self.split_irsb(node.irsb, infos['address'])
+
+
+                        
+                        
+            
                 
                 # assert first_instruction == group leader
 

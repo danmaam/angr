@@ -63,6 +63,14 @@ class CodeNode:
 
     is_hook = None
 
+class BasicBlock(CodeNode):
+    def __init__(self, addr, size, graph=None, thumb=False, irsb=None, instructions=None):
+        super().__init__(addr, size, graph=graph, thumb=thumb)
+        self.irsb = irsb
+
+    def split(self, addr):
+        
+
 
 class BlockNode(CodeNode):
 
