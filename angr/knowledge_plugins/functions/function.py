@@ -12,8 +12,9 @@ from itanium_demangler import parse
 from cle.backends.symbol import Symbol
 from archinfo.arch_arm import get_real_address_if_arm
 import claripy
+import archinfo
 
-from ...codenode import CodeNode, BlockNode, HookNode, SyscallNode
+from ...codenode import CodeNode, BlockNode, HookNode, SyscallNode, BasicBlock
 from ...serializable import Serializable
 from ...errors import AngrValueError, SimEngineError, SimMemoryError
 from ...procedures import SIM_LIBRARIES
@@ -864,6 +865,35 @@ class Function(Serializable):
         :param retn_addr:            The address that said call will return to.
         """
         self._call_sites[call_site_addr] = (call_target_addr, retn_addr)
+
+
+    def _split_node(self, node, split_addr):
+        #TODO: insert assert of node in transition_graph
+        assert node.addr < split_addr and split_addr <= node.addr + node.size
+
+        #find the split point
+        split_idx = [idx for (idx, elem) in enumerate(node.irsb.statements) if hasattr(elem, 'addr') and elem.addr == split_addr][0]
+
+        (car, cdr) = (node.irsb.statements[:split_idx], node.irsb.statements[split_idx:])
+
+        car_irsb = node.empty_block(archinfo.ArchAMD64(), node.addr, car)
+        cdr_irsb = node.empty_block(archinfo.ArchAMD64(), split_addr, cdr, jumpkind = node.jumpkind)
+
+        node_1 = BasicBlock(node.addr, car_irsb.size, self.transition_graph, irsb = car_irsb)
+        node_2 = BasicBlock(split_addr, cdr_irsb.size, self.transition_graph, irsb = cdr_irsb)
+
+        # fix edges in the graph
+        for pred in node.predecessors:
+            self.transition_graph.remove_edge(pred, node)
+            self._transit_to(pred, node_1)
+        
+        for succ in node.successors:
+            self._transit_to(node_2, succ)
+
+        self._transit_to(node_1, node_2)
+
+        return (node_1, node_2)
+            
 
     def _add_endpoint(self, endpoint_node, sort):
         """

@@ -11,7 +11,7 @@ from .cfg_base import CFGBase
 from ..forward_analysis import ForwardAnalysis
 from ...knowledge_plugins.cfg import CFGNode, MemoryDataSort, MemoryData, IndirectJump, IndirectJumpType
 from angr.analyses.forward_analysis.job_info import JobInfo
-from angr.codenode import CodeNode
+from angr.codenode import CodeNode, BasicBlock
 
 
 from ..analysis import AnalysesHub
@@ -25,6 +25,8 @@ import archinfo
 import IPython
 
 l = logging.getLogger(name=__name__)
+
+
 class CFGInstrace(ForwardAnalysis, CFGBase):
     """
     The CFG is recovered from a list of executed instructions, and a trace
@@ -52,26 +54,22 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         self._state = {}
 
-        #TODO: load also bytestrings
+        # TODO: load also bytestrings
         with open(trace, "rb") as trace_stream:
             buf = trace_stream.read()
             self._ins_trace = json.loads(buf)
 
         self._analyze()
-        
+
         # shitty hacks just to test the code working
         self._low_img = 0x55b5326c7000
         self._high_img = 0x55b5326c9ab8
 
-
-
-
-        #self.project.loader._instruction_map
-
+        # self.project.loader._instruction_map
 
     def range(self, addr):
         return self._low_img <= addr and addr <= self._high_img
-    
+
     def _pre_analysis(self):
         # build basic blocks from the instruction trace
         # need to emulate the trace for each thread
@@ -85,7 +83,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         tid = '0'
 
         th_trace = self._ins_trace['thread_exec_trace'][tid]
-        
 
         first_address = None
         bytecode = b""
@@ -95,54 +92,51 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         # construct the first basic block
 
-        while True:         
+        while True:
             curr_ins = th_trace.pop(0)
 
             if first_address is None:
                 first_address = curr_ins['address']
 
-            instructions.append(self.project.loader._instruction_map[curr_ins['address']][curr_ins['timestamp']])
+            instructions.append(
+                self.project.loader._instruction_map[curr_ins['address']][curr_ins['timestamp']])
             instruction_info.append(curr_ins)
 
-
             if 'destination' in curr_ins.keys():
-                        # build the irsb, add the node to the model, create the first job
+                # build the irsb, add the node to the model, create the first job
 
-                bytecode = b''.join(instructions)   
-                irsb = pyvex.lift(bytecode, first_address, archinfo.ArchAMD64())
+                bytecode = b''.join(instructions)
+                irsb = pyvex.lift(bytecode, first_address,
+                                  archinfo.ArchAMD64())
 
                 # create the current pair
-                initial = self.functions.function(addr = first_address, create = True)
-                self._current = (initial, initial.addr)
+                initial = self.functions.function(
+                    addr=first_address, create=True)
+                self._current = {}
 
-                
+                # create the first basic block
+                first_block = BasicBlock(
+                    first_address, graph=initial.transition_graph)
 
-                node = CFGNode(first_address, len(bytecode), self.model, irsb=irsb)
+                self._current['function'] = initial
+                self._current['working'] = first_block
 
-                new_job = CFGJob(first_address, node, curr_ins['destination'], instructions, instruction_info)
+                node = CFGNode(first_address, len(
+                    bytecode), self.model, irsb=irsb)
+
+                new_job = CFGJob(
+                    first_address, node, curr_ins['destination'], instructions, instruction_info)
                 self._insert_job(new_job)
 
                 break
-        
+
         IPython.embed()
 
     def split_irsb(self, split_addr):
-        # assert the address of splitting is in range of the irsb
-        assert self.addr < split_addr and split_addr <= self.addr + self.size
-
-        #find the split point
-        split_idx = [idx for (idx, elem) in enumerate(self.statements) if hasattr(elem, 'addr') and elem.addr == split_addr][0]
-
-        (car, cdr) = (self.statements[:split_idx], self.statements[split_idx:])
-
-        car_irsb = self.empty_block(archinfo.ArchAMD64(), self.addr, car)
-        cdr_irsb = self.empty_block(archinfo.ArchAMD64(), split_addr, cdr, jumpkind = self.jumpkind)
-
-        return (car_irsb, cdr_irsb)
-
+        self._current
 
     def _job_key(self, job):
-        return job.addr           
+        return job.addr
 
     def _job_queue_empty(self) -> None:
         l.info("Job queue is empty. Stopping.")
@@ -152,65 +146,73 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         print("pre_job_handling")
         return
 
-
     def _process_job_and_get_successors(self, job_info: JobInfo) -> None:
-        # per each job, creates edges in the CFG, and gets the successor(s) node 
+        # per each job, creates edges in the CFG, and gets the successor(s) node
+
+        leader_address = job_info.instruction_info[0]['address']
 
         # implementation of PROCESS_GROUP of CFGGrind
         curr_instr = None
 
         for instr in zip(job_info.job.instruction_info, job_info.job.instructions):
+
             if curr_instr:
                 assert curr_instr == instr
             else:
-
                 infos = instr[0]
                 bytecode = instr[1]
 
+                node = self.model.get_any_node(
+                    addr=infos['address'], anyaddr=True)
 
-                node = self.model.get_any_node(addr = infos['address'], anyaddr = True)
-
-
+                working = self._current['working']
+                
                 if node:
                     if isinstance(node, PhantomNode):
                         # CONVERT PHANTOM NODE TO NORMAL NODE
-                        continue
+                        self.model.remove_node(node)
+                        ir = pyvex.lift(bytecode, infos['address'], archinfo.ArchAMD64())
+                        node = BasicBlock(infos['address'], graph=self._current['function'].transition_graph, size = ir.size, irsb = ir)
+                        working = node
                     elif node.addr != infos['address']:
                         # split the node in the cfg
-                        (car, cdr) = self.split_irsb(node.irsb, infos['address'])
 
+                        (a, b) = self.split_irsb(node.irsb, infos['address'])
+                        self.model.remove_node(node.addr, node)
+                        self.model.add_node(a.addr, a)
+                        self.model.add_node(b.addr, b)
+                        working = b
 
-                        
-                        
-            
-                
-                # assert first_instruction == group leader
-
-
+                    # assert first_instruction == group leader                
 
                 else:
-                    #if the node isn't found
-                    continue
+                    ir = pyvex.lift(bytecode, infos['address'], archinfo.ArchAMD64())
 
-            
-                
+                    if infos['address'] != leader_address and isinstance(working, BasicBlock) and  \
+                            ("Call" not in working.irsb.jumpkind) and ("Sig" not in working.irsb.jumpkind) and (not working.successors):
+                        # TODO: assert tail address is equal to the current instruction
+                        working.add_bytecode(bytecode, archinfo.ArchAMD64())                       
+                        
+                    else:
+                        node = BasicBlock(infos['address'], graph=self._current['function'].transition_graph, irsb = ir)
+                        self._current['function']._transit_to(working, node)
+                        working = node
+                    pass
 
-
-
-        print("process_job_successors")
-
+        self._current['working'] = working
         return
 
     # def _handle_successor(self, job: CFGJobBase, successor: SimState, successors: List[SimState]) -> List[CFGJobBase]:
     #     successors = List[CFGJobBase]
     #     # per each successor generated, add it to the list of jobs
     #     return successors
-        
+
+
 class CFGJob():
-    def __init__(self, addr: int, node: CFGNode, destination: int, instructions:List, instruction_info:List,
-                 last_addr: Optional[int]=None,
-                 src_node: Optional[CFGNode]=None, src_ins_addr:Optional[int]=None,
-                 src_stmt_idx: Optional[int]=None, returning_source=None, syscall: bool=False):
+    def __init__(self, addr: int, node: CFGNode, destination: int, instructions: List, instruction_info: List,
+                 last_addr: Optional[int] = None,
+                 src_node: Optional[CFGNode] = None, src_ins_addr: Optional[int] = None,
+                 src_stmt_idx: Optional[int] = None, returning_source=None, syscall: bool = False):
         self.addr = addr
         self.node = node
         self.destination = destination
@@ -223,17 +225,11 @@ class CFGJob():
         self.instruction_info = instruction_info
         self.instructions = instructions
 
+
 class PhantomNode(CFGNode):
     def __init__(self, addr, cfg, function_address=None):
-        super().__init__(addr, 0, cfg, simprocedure_name = None, no_ret =False, function_address=function_address, block_id = None, irsb=None, soot_block=None, instruction_addrs = None, thumb=None, byte_string=None, is_syscall=False, name=None)
-        
-
-
-    
-
-
-
-        
+        super().__init__(addr, 0, cfg, simprocedure_name=None, no_ret=False, function_address=function_address, block_id=None,
+                         irsb=None, soot_block=None, instruction_addrs=None, thumb=None, byte_string=None, is_syscall=False, name=None)
 
 
 AnalysesHub.register_default('CFGInstrace', CFGInstrace)
