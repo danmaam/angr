@@ -1,6 +1,8 @@
 import logging
 from typing import List
 import pyvex
+import archinfo
+import IPython
 
 l = logging.getLogger(name=__name__)
 
@@ -69,23 +71,43 @@ class BasicBlock(CodeNode):
 	def __init__(self, addr, size=0, graph=None, thumb=False, irsb=None, instructions=None, calls=None, signals = None):
 		super().__init__(addr, size, graph=graph, thumb=thumb)
 		if irsb is not None:
+			assert isinstance(irsb, pyvex.IRSB)
 			self._irsb = irsb
 		else:
-			self._irsb = None
+			self._irsb = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr = addr, jumpkind='Ijk_NoDecode')
+			
 
 		self._calls = calls if calls else {}
 		self._signals = signals if signals else {}
 
-	def add_bytecode(self, bytecode, arch):
-		ir = pyvex.lift(bytecode, len(bytecode), arch)
-		if self._irsb is None:
-			self._irsb = ir
-		else:
-			self._irsb = self._irsb.extend(ir)
+	# TODO: for now just add the jumpkind at the end of the block construction
+	def add_statement(self, statement, addr = None):
 
-		self.size += ir.size
+		# TODO: make this process faster
+		if addr is None:
+			addr = self._irsb.size + self._irsb.addr
 
-		#TODO: add signal and calls handler
+			print("\n===========")
+			print("addr: ", hex(addr))
+			print(statement)
+			print("===========\n")
+		empty = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr, [statement])
+		self._irsb.extend(empty)
+
+		
+	def append_jumpkind(self, jumpkind):
+		self._irsb.jumpkind = jumpkind
+
+	def get_head_statement(self):
+		assert self._irsb != None
+		return self._irsb.statements[0]
+
+	#TODO: please improve this shitty thing
+	def next_statement(self, statement):
+		for idx, elem in enumerate(self._irsb.statements):
+			if elem == statement:
+				return self._irsb.statements[idx+1] if idx + 1 < len(self._irsb.statements) else None
+		
 	
 
 	

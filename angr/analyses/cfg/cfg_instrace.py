@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 
 from sympy import false, true
 
+from angr.engines.pcode.lifter import IRSB
+
 from .cfg_job_base import CFGJobBase
 from .cfg_base import CFGBase
 from ..forward_analysis import ForwardAnalysis
@@ -81,56 +83,62 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         # try with first thread
         tid = '0'
+        ts = 0
 
         th_trace = self._ins_trace['thread_exec_trace'][tid]
 
-        first_address = None
+        block_head = None
         bytecode = b""
 
         instructions = []
         instruction_info = []
 
-        # construct the first basic block
+        # build the irsb of the group
 
         while True:
-            curr_ins = th_trace.pop(0)
+            current_instruction = th_trace.pop(0)
+            block_head = current_instruction['address'] if block_head is None else block_head
 
-            if first_address is None:
-                first_address = curr_ins['address']
+            instructions.append(self.project.loader._instruction_map[current_instruction['address']][ts])
 
-            instructions.append(
-                self.project.loader._instruction_map[curr_ins['address']][curr_ins['timestamp']])
-            instruction_info.append(curr_ins)
 
-            if 'destination' in curr_ins.keys():
-                # build the irsb, add the node to the model, create the first job
+            if 'destination' in current_instruction.keys():
+                # end of the basic block, lift it to IRSB
 
                 bytecode = b''.join(instructions)
-                irsb = pyvex.lift(bytecode, first_address,
+                
+                irsb = pyvex.lift(bytecode, block_head,
                                   archinfo.ArchAMD64())
 
-                # create the current pair
+
+                # create the first function in the function manager
                 initial = self.functions.function(
-                    addr=first_address, create=True)
-                self._current = {}
+                    addr=block_head, create=True)
 
-                # create the first basic block
+
+                # create the entry basic block
                 first_block = BasicBlock(
-                    first_address, graph=initial.transition_graph)
+                    block_head, graph=initial.transition_graph)
 
+
+                # create the self._current pair
+                self._current = {}
                 self._current['function'] = initial
                 self._current['working'] = first_block
 
-                node = CFGNode(first_address, len(
+                # create in the cfg the entry for this first function
+                node = CFGNode(block_head, len(
                     bytecode), self.model, irsb=irsb)
 
+                self.model.add_node(block_head, first_block)
+                self.model.add_node(block_head, node)
+
                 new_job = CFGJob(
-                    first_address, node, curr_ins['destination'], instructions, instruction_info)
+                    block_head, node, current_instruction['destination'], block_irsb=irsb)
                 self._insert_job(new_job)
 
                 break
 
-        IPython.embed()
 
     def split_irsb(self, split_addr):
         self._current
@@ -148,57 +156,62 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
     def _process_job_and_get_successors(self, job_info: JobInfo) -> None:
         # per each job, creates edges in the CFG, and gets the successor(s) node
+        # TODO: fix the shitty thing of adding jumpkind only at the end of block processing
 
-        leader_address = job_info.instruction_info[0]['address']
 
-        # implementation of PROCESS_GROUP of CFGGrind
-        curr_instr = None
+        curr_statement = None
+        group : pyvex.IRSB = job_info.job.block_irsb
 
-        for instr in zip(job_info.job.instruction_info, job_info.job.instructions):
-
-            if curr_instr:
-                assert curr_instr == instr
-            else:
-                infos = instr[0]
-                bytecode = instr[1]
-
-                node = self.model.get_any_node(
-                    addr=infos['address'], anyaddr=True)
+        for statement in group.statements:
+            
+            if curr_statement:
+                assert curr_statement == statement
+            
+            elif hasattr(statement, 'addr'):
+                node : BasicBlock = self.model.get_any_node(
+                    addr=statement.addr, anyaddr=True)
 
                 working = self._current['working']
                 
                 if node:
+                    assert isinstance(node, BasicBlock)
                     if isinstance(node, PhantomNode):
                         # CONVERT PHANTOM NODE TO NORMAL NODE
-                        self.model.remove_node(node)
-                        ir = pyvex.lift(bytecode, infos['address'], archinfo.ArchAMD64())
-                        node = BasicBlock(infos['address'], graph=self._current['function'].transition_graph, size = ir.size, irsb = ir)
+                        self.model.remove_node(node)                        
+                        ir = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), statement.addr, [statement])
+                        node = BasicBlock(statement.addr, graph=self._current['function'].transition_graph, size = ir.size, irsb = ir)
                         working = node
-                    elif node.addr != infos['address']:
+
+                    elif node.get_head_statement() != statement:
                         # split the node in the cfg
 
-                        (a, b) = self.split_irsb(node.irsb, infos['address'])
+                        (a, b) = self.split_irsb(node.irsb, statement.addr)
                         self.model.remove_node(node.addr, node)
                         self.model.add_node(a.addr, a)
                         self.model.add_node(b.addr, b)
                         working = b
 
-                    # assert first_instruction == group leader                
+                    assert statement == node.get_head_statement()              
 
                 else:
-                    ir = pyvex.lift(bytecode, infos['address'], archinfo.ArchAMD64())
 
-                    if infos['address'] != leader_address and isinstance(working, BasicBlock) and  \
-                            ("Call" not in working.irsb.jumpkind) and ("Sig" not in working.irsb.jumpkind) and (not working.successors):
-                        # TODO: assert tail address is equal to the current instruction
-                        working.add_bytecode(bytecode, archinfo.ArchAMD64())                       
+
+                    if statement != group.statements[0] and isinstance(working, BasicBlock) and  \
+                            ("Call" not in working._irsb.jumpkind) and ("Sig" not in working._irsb.jumpkind) and (not working.successors):
+                        # TODO: assert (working.group.tail.addr + working.group.tail.size) == instr.addr
+                        working.add_statement(statement, addr = statement.addr)                     
                         
                     else:
-                        node = BasicBlock(infos['address'], graph=self._current['function'].transition_graph, irsb = ir)
+                        ir = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), statement.addr, [statement])
+                        node = BasicBlock(statement.addr, graph=self._current['function'].transition_graph, irsb = ir)
                         self._current['function']._transit_to(working, node)
                         working = node
                     pass
+            else:
+                working.add_statement(statement)
 
+        curr_statement = working.next_statement(statement)
+        working.jumpkind = group.jumpkind
         self._current['working'] = working
         return
 
@@ -209,7 +222,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 class CFGJob():
-    def __init__(self, addr: int, node: CFGNode, destination: int, instructions: List, instruction_info: List,
+    def __init__(self, addr: int, node: CFGNode, destination: int, block_irsb : pyvex.IRSB,
                  last_addr: Optional[int] = None,
                  src_node: Optional[CFGNode] = None, src_ins_addr: Optional[int] = None,
                  src_stmt_idx: Optional[int] = None, returning_source=None, syscall: bool = False):
@@ -222,8 +235,7 @@ class CFGJob():
         self.src_stmt_idx = src_stmt_idx
         self.returning_source = returning_source
         self.syscall = syscall
-        self.instruction_info = instruction_info
-        self.instructions = instructions
+        self.block_irsb = block_irsb
 
 
 class PhantomNode(CFGNode):
