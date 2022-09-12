@@ -68,48 +68,68 @@ class CodeNode:
 
 
 class BasicBlock(CodeNode):
-	def __init__(self, addr, size=0, graph=None, thumb=False, irsb=None, instructions=None, calls=None, signals = None):
+	def __init__(self, addr=0, size=0, graph=None, thumb=False, irsb:pyvex.IRSB=None, instructions=None, is_phantom=False):
 		super().__init__(addr, size, graph=graph, thumb=thumb)
-		if irsb is not None:
-			assert isinstance(irsb, pyvex.IRSB)
-			self._irsb = irsb
-		else:
-			self._irsb = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr = addr, jumpkind='Ijk_NoDecode')
-			
+		if not is_phantom:
+			assert graph is not None and irsb is not None
+			if irsb is not None:
+				assert isinstance(irsb, pyvex.IRSB)
+				self._irsb = irsb
+			else:
+				self._irsb = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr = addr, jumpkind='Ijk_NoDecode')
+				
 
-		self._calls = calls if calls else {}
-		self._signals = signals if signals else {}
+
+			self._graph.add_node(self)
+
+		self.is_phantom = is_phantom
 
 	# TODO: for now just add the jumpkind at the end of the block construction
-	def add_statement(self, statement, addr = None):
-
+	def add_statement(self, statement, addr = None, tyenv = None, jumpkind = None):
+		assert not self.is_phantom
 		# TODO: make this process faster
 		if addr is None:
 			addr = self._irsb.size + self._irsb.addr
 
-			print("\n===========")
-			print("addr: ", hex(addr))
-			print(statement)
-			print("===========\n")
-		empty = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr, [statement])
+		empty = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr, [statement], tyenv=tyenv, jumpkind = jumpkind if jumpkind else self._irsb.jumpkind)
 		self._irsb.extend(empty)
+
+
+	def is_phantom(self):
+		assert not self.is_phantom
+		return self.is_phantom
+
+	def has_statement(self, idx, statement):
+		assert not self.is_phantom
+		return (idx, statement) in enumerate(self._irsb.statements)
 
 		
 	def append_jumpkind(self, jumpkind):
+		assert not self.is_phantom
 		self._irsb.jumpkind = jumpkind
 
 	def get_head_statement(self):
-		assert self._irsb != None
-		return self._irsb.statements[0]
+		assert self._irsb != None and not self.is_phantom
+		return self._irsb.statements[0] if self._irsb.stmts_used > 0 else None
 
 	#TODO: please improve this shitty thing
 	def next_statement(self, statement):
+		assert not self.is_phantom
 		for idx, elem in enumerate(self._irsb.statements):
 			if elem == statement:
 				return self._irsb.statements[idx+1] if idx + 1 < len(self._irsb.statements) else None
 		
 	
+	def phantom_to_node(self, graph, irsb, thumb = False):
+		assert self.is_phantom
+		self.addr = irsb.addr
+		self.size = irsb.size
+		self.thumb = thumb
+		self._irsb = irsb
+		self.is_phantom = False
 
+	def pp(self):
+		self._irsb.pp()
 	
 
 		
