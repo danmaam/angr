@@ -10,6 +10,10 @@ from ...errors import AngrForwardAnalysisError
 from ...errors import AngrSkipJobNotice, AngrDelayJobNotice, AngrJobMergingFailureNotice, AngrJobWideningFailureNotice
 from ...utils.algo import binary_insert
 from .job_info import JobInfo
+import IPython
+import logging
+
+l = logging.getLogger(name=__name__)
 
 if TYPE_CHECKING:
     from .visitors.graph import GraphVisitor
@@ -364,6 +368,8 @@ class ForwardAnalysis(Generic[AnalysisState, NodeType]):
 
             job_info = self._job_info_queue[0]
 
+            l.info("Processing job @" + hex(job_info.job.addr))
+
             try:
                 self._pre_job_handling(job_info.job)
             except AngrDelayJobNotice:
@@ -399,6 +405,7 @@ class ForwardAnalysis(Generic[AnalysisState, NodeType]):
         job = job_info.job
     
         successors = self._get_successors(job)
+
 
         all_new_jobs = [ ]
 

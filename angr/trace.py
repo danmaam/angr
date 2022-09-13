@@ -35,7 +35,6 @@ class DynamicRecoveredInstructions(Backend):
             bytecode = self._binary_stream.read(size)
 
             self._add_instruction(insaddr, bytecode, timestamp)
-        print(self)
 
     def _add_instruction(self, instruction_address, bytecode, timestamp):
         """

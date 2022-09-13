@@ -154,8 +154,6 @@ class Project:
 			self.filename = None
 			#load_options {'main_opts': {'backend': 'blob', 'arch': <Arch AMD64 (LE)>}}
 			self.loader = cle.Loader(thing, **load_options)
-
-			print(thing.read())
 		elif not isinstance(thing, (str, Path)) or not os.path.exists(thing) or not os.path.isfile(thing):
 			raise Exception("Not a valid binary file: %s" % repr(thing))
 		else:

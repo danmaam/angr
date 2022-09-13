@@ -29,6 +29,13 @@ import IPython
 
 l = logging.getLogger(name=__name__)
 
+class CallStackWithCurrent(CallStack):
+    def __init__(self, current = None, call_site_addr=0, func_addr=0, stack_ptr=0, ret_addr=0, jumpkind='Ijk_Call', next_frame: Optional['CallStack'] = None, invoke_return_variable=None) :
+        super().__init__(call_site_addr, func_addr, stack_ptr, ret_addr, jumpkind, next_frame, invoke_return_variable)
+        assert current is not None
+        self.current = current
+    
+
 
 class CFGJob():
     def __init__(self, addr: int, node: CFGNode, destination: int, block_irsb : pyvex.IRSB,
@@ -97,14 +104,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         self._analyze()
 
         # shitty hacks just to test the code working
-        self._low_img = 0x55b5326c7000
+        self._low_img = 0x5616e85e4000
         self._high_img = 0x55b5326c9ab8
 
         # self.project.loader._instruction_map
 
     def next_irsb_block(self, tid, ts):
-
-        print(tid)
+        
         block_head = None
 
         th_trace = self._ins_trace['thread_exec_trace'][tid]
@@ -130,6 +136,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 next_ip = current_instruction['destination']
                 
                 break
+            
+        irsb.pp()
 
         return block_head, irsb, next_ip
 
@@ -202,13 +210,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                     assert node._irsb == group
 
             # jump in middle of a function
+            # TODO: differentiate between jump in middle of funciton or jump not to the first instruction \
+            # of a block
+
+
             # TODO: make get any node return a list of nodes and not a single node
             else:
-                (a, b) = self.split_irsb(node._irsb, group.addr)
-                self.model.remove_node(node.addr, node)
-                self.model.add_node(a.addr, a)
-                self.model.add_node(b.addr, b)
-                working = b
+                working = self.split_node(node, group)
 
         else:
             # there isn't any node with the address of the current group
@@ -221,25 +229,42 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         self._current.working = working
 
-        print(working)
         return     
 
 
 
-
+    def split_node(self, node, group) -> BasicBlock :
+        (a, b) = self.split_irsb(node._irsb, group.addr)
+        self.model.remove_node(node.addr, node)
+        self.model.add_node(a.addr, a)
+        self.model.add_node(b.addr, b)
+        return b
+        
 
     def process_type(self, target):
-
-
+        
         working : BasicBlock = self._current.working
         jumpkind = working._irsb.jumpkind
 
-        working.pp()
-
-        IPython.embed()
 
         if jumpkind == 'Ijk_Boring':
-            pass
+            # handles all the jumps (conditional or not) found
+            jump_targets = working._irsb.constant_jump_targets.copy()
+            jump_targets.add(target)
+
+            for t in jump_targets:
+                if t != target:
+                    node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
+                    if node is not None:
+                        assert isinstance(node, BasicBlock)
+                        if not node.is_phantom() and node.addr != target:
+                            node = self.split_node(node, target)
+                    else:
+                        node = BasicBlock(addr = t, is_phantom = True)
+                        self.model.add_node(t, node)
+                    self._current.function._transit_to(working, node)                       
+
+
         
         elif jumpkind == 'Ijk_Call':
             # Register the call site in the current function            
@@ -260,18 +285,26 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 phantom_return, ins_addr = callsite_address
                 )
             
-            self._callstack.call(callsite_address, target, return_address)
-            
+            frame = CallStackWithCurrent(call_site_addr=callsite_address, func_addr=target, ret_addr=return_address,
+                          current=self._current)
+            self._callstack.push(frame)
+
+                       
             self._current.set_function(called)
             # TODO: find a better way to find the entry point of the function instead of a crap 
             # "hello code find the node in the cfg"
             self._current.working = self.model.get_node(target)
+
+            l.info("Processing call to " + hex(target) + " | returning at " + hex(return_address))
         
         elif jumpkind == 'Ijk_Ret':
-            # TODO: find out if the edges to be addedd are necessary
-            pass
-            
-        return []
+            # TODO: find out if the edges to be addedd are necessary 
+            l.info("Returning to " + hex(target))
+            ret = self._callstack.pop()
+            # returned = self._callstack.ret(target)
+            # self._current = returned.current
+            # pass
+        
 
 
 
@@ -286,10 +319,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         # of the jumpkind of the current working basic block w.r.t the head address
         # of the new basic block
 
-        successors = self.process_type(head)        
+        self.process_type(head)        
         new_job = CFGJob(head, None, next_ip, irsb, thread = job.thread)
 
-        return []
+        return [new_job]
         
 
     # it isn't necessary to implement a post job handler
@@ -298,10 +331,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
     def _handle_successor(self, job: CFGJobBase, successor, successors):
-        print("invoked handle_successor")
-        print(successor)
         # per each successor generated, add it to the list of jobs
         return successors
+
+    def _intra_analysis(self):
+        return
 
 
 AnalysesHub.register_default('CFGInstrace', CFGInstrace)
