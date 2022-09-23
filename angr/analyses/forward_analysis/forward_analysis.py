@@ -368,7 +368,7 @@ class ForwardAnalysis(Generic[AnalysisState, NodeType]):
 
             job_info = self._job_info_queue[0]
 
-            l.info("Processing job @" + hex(job_info.job.addr))
+            #l.info("Processing job @" + hex(job_info.job.addr))
 
             try:
                 self._pre_job_handling(job_info.job)

@@ -94,11 +94,6 @@ class BasicBlock(CodeNode):
 		empty = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr, [statement], tyenv=tyenv, jumpkind = jumpkind if jumpkind else self._irsb.jumpkind)
 		self._irsb.extend(empty)
 
-
-	def is_phantom(self):
-		assert not self.is_phantom
-		return self.is_phantom
-
 	def has_statement(self, idx, statement):
 		assert not self.is_phantom
 		return (idx, statement) in enumerate(self._irsb.statements)

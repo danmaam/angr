@@ -6,16 +6,17 @@ from typing import Iterator, Optional
 
 from .plugin import SimStatePlugin
 from ..errors import AngrError, SimEmptyCallStackError
-
+import IPython
 l = logging.getLogger(name=__name__)
 
+# TODO: use python inheritance :)
 class CallStack(SimStatePlugin):
     """
     Stores the address of the function you're in and the value of SP
     at the VERY BOTTOM of the stack, i.e. points to the return address.
     """
     def __init__(self, call_site_addr=0, func_addr=0, stack_ptr=0, ret_addr=0, jumpkind='Ijk_Call', next_frame: Optional['CallStack'] = None,
-                 invoke_return_variable=None):
+                 invoke_return_variable=None, current=None):
         super().__init__()
         self.state = None
         self.call_site_addr = call_site_addr
@@ -29,6 +30,7 @@ class CallStack(SimStatePlugin):
         self.block_counter = collections.Counter()
         self.procedure_data = None
         self.locals = {}
+        self.current = current
 
     #
     # Public methods
@@ -235,6 +237,7 @@ class CallStack(SimStatePlugin):
 
         return cf
 
+
     def pop(self):
         """
         Pop the top frame from the stack. Return the new stack.
@@ -251,7 +254,7 @@ class CallStack(SimStatePlugin):
 
         return new_list
 
-    def call(self, callsite_addr, addr, retn_target=None, stack_pointer=None):
+    def call(self, callsite_addr, addr, retn_target=None, stack_pointer=None, current=None):
         """
         Push a stack frame into the call stack. This method is called when calling a function in CFG recovery.
 
@@ -263,7 +266,7 @@ class CallStack(SimStatePlugin):
         """
 
         frame = CallStack(call_site_addr=callsite_addr, func_addr=addr, ret_addr=retn_target,
-                          stack_ptr=stack_pointer)
+                          stack_ptr=stack_pointer, current=current)
         return self.push(frame)
 
     def ret(self, retn_target=None):
@@ -285,9 +288,12 @@ class CallStack(SimStatePlugin):
         if return_target_index is not None:
 
             o = self
+
+
             while return_target_index >= 0:
                 o = o.pop()
                 return_target_index -= 1
+            
             return o
 
         l.warning("Returning to an unexpected address %#x", retn_target)
