@@ -132,6 +132,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                                   archinfo.ArchAMD64())
 
                 next_ip = current_instruction['destination']
+
+                # FOR DEBUGGING PURPOSES
+                md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+                for i in md.disasm(bytecode, block_head):
+                    print("0x%x:\t%s\t%s" % (i.address, i.mnemonic, i.op_str))
+                print("\n")
                 
                 break
             
@@ -178,8 +184,24 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         self._insert_job(new_job)
 
 
-    def split_irsb(self, split_addr):
-        self._current
+    def split_irsb(self, irsb, split_addr):
+        # assert the address of splitting is in range of the irsb
+        assert irsb.addr < split_addr and split_addr <= irsb.addr + irsb.size
+
+        #find the split point
+        split_idx = [idx for (idx, elem) in enumerate(irsb.statements) if hasattr(elem, 'addr') and elem.addr == split_addr][0]
+
+        (car, cdr) = (irsb.statements[:split_idx], irsb.statements[split_idx:])
+
+        # create the irsbs
+        car_irsb = irsb.empty_block(archinfo.ArchAMD64(), irsb.addr, car)
+        cdr_irsb = irsb.empty_block(archinfo.ArchAMD64(), split_addr, cdr, jumpkind = irsb.jumpkind)
+
+        # create the new basic blocks
+        car_bb = BasicBlock(car_irsb.addr, car_irsb.size, self._current.function.transition_graph, irsb=car_irsb)
+        cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self._current.function.transition_graph, irsb=cdr_irsb)
+
+        return (car_bb, cdr_bb)
 
     def _job_key(self, job):
         return job.addr
@@ -264,43 +286,50 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         
         elif jumpkind == 'Ijk_Call':
-            # Register the call site in the current function            
-            called = self.functions.function(target, create = True)
-
+            # Check if it's a call to a library function
+            return_address = working.addr + working.size
             # TODO: for the future myself: you don't want to find the address of call by accessing to the last address, 
             # trust me, you don't want to do that, you will regret of this piece of code you wrote
             callsite_address = working._irsb.instruction_addresses[-1]
 
-            # Try to calculate the return from the call, so that it's possible to create the phantom node
-            return_address = working.addr + working.size
-            phantom_return = BasicBlock(return_address, is_phantom = True)
 
-            self.model.add_node(return_address, phantom_return)
-            self._current.function._transit_to(working, phantom_return)
-            
-            self.functions._add_call_to(self._current.function.addr, working, target, \
-                phantom_return, ins_addr = callsite_address
-                )           
+            # TODO: dump from pin API call instead of this horrible check 
+            if target != return_address:
+                # Register the call site in the current function            
+                called = self.functions.function(target, create = True)
 
+                # Try to calculate the return from the call, so that it's possible to create the phantom node
+                phantom_return = BasicBlock(return_address, is_phantom = True)
 
-            if self._callstack is None:
-                self._callstack = CallStack(callsite_address, target, ret_addr=return_address, current=self._current)
+                self.model.add_node(return_address, phantom_return)
+                self._current.function._transit_to(working, phantom_return)
+                
+                self.functions._add_call_to(self._current.function.addr, working, target, \
+                    phantom_return, ins_addr = callsite_address
+                    )           
+
+                if self._callstack is None:
+                    self._callstack = CallStack(callsite_address, target, ret_addr=return_address, current=self._current)
+
+                else:
+                    self._callstack = self._callstack.call(callsite_address, target, retn_target=return_address,
+                                current=self._current)
+
+                        
+                self._current.set_function(called)
+                # TODO: find a better way to find the entry point of the function instead of a crap 
+                # "hello code find the node in the cfg"
+                self._current.working = self.model.get_node(target)
+
+                l.info(hex(callsite_address) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
             else:
-                self._callstack = self._callstack.call(callsite_address, target, retn_target=return_address,
-                            current=self._current)
-
-                       
-            self._current.set_function(called)
-            # TODO: find a better way to find the entry point of the function instead of a crap 
-            # "hello code find the node in the cfg"
-            self._current.working = self.model.get_node(target)
-
-            l.info(hex(callsite_address) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
+                l.warning("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
         
         elif jumpkind == 'Ijk_Ret' and self._callstack is not None:
             # TODO: find out if the edges to be addedd are necessary 
             l.info("Returning to " + hex(target))
+            #7working.pp()
             try:
                 returned = self._callstack
                 self._callstack = self._callstack.ret(target)
@@ -309,6 +338,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 pass
             except SimEmptyCallStackError:
                 l.warning("Stack empty")
+            except AttributeError:
+                IPython.embed()
 
 
         

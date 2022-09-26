@@ -30,6 +30,8 @@ class CallStack(SimStatePlugin):
         self.block_counter = collections.Counter()
         self.procedure_data = None
         self.locals = {}
+
+        assert current is not None
         self.current = current
 
     #
@@ -44,6 +46,7 @@ class CallStack(SimStatePlugin):
         o.stack_ptr = self.stack_ptr
         o.ret_addr = self.ret_addr
         o.jumpkind = self.jumpkind
+        o.current = self.current
         o.next = self.next if with_tail else None
         o.invoke_return_variable = self.invoke_return_variable
 
