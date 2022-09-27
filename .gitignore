@@ -36,3 +36,5 @@ Scripts/
 pyvenv.cfg
 share/
 .DS_Store
+bytecode.bin
+trace.json

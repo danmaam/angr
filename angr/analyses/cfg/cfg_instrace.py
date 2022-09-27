@@ -4,6 +4,8 @@ from inspect import trace
 from sqlite3 import Timestamp
 from typing import Dict, List, Optional
 import collections
+from copy import copy
+import sys
 
 # LAST BASE: 0x7ff6153c0000
 
@@ -72,6 +74,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         def set_working(self, working):
             self.working = working
 
+        def pp(self):
+            print(hex(self.working.addr))
+
+
 
 
     def __init__(self, trace, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None):
@@ -119,7 +125,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         while True:
             current_instruction = th_trace.pop(0)
             block_head = current_instruction['address'] if block_head is None else block_head
-
+            
             instructions.append(self.project.loader._instruction_map[current_instruction['address']][ts])
 
 
@@ -133,11 +139,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
                 next_ip = current_instruction['destination']
 
-                # FOR DEBUGGING PURPOSES
-                md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
-                for i in md.disasm(bytecode, block_head):
-                    print("0x%x:\t%s\t%s" % (i.address, i.mnemonic, i.op_str))
-                print("\n")
+                #FOR DEBUGGING PURPOSES
+                # md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+                # for i in md.disasm(bytecode, block_head):
+                #     sys.stderr.write("0x%x:\t%s\t%s\n" % (i.address, i.mnemonic, i.op_str))
+                # sys.stderr.write("\n")
                 
                 break
             
@@ -185,6 +191,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
     def split_irsb(self, irsb, split_addr):
+        l.info("Splitting @" + hex(split_addr))
         # assert the address of splitting is in range of the irsb
         assert irsb.addr < split_addr and split_addr <= irsb.addr + irsb.size
 
@@ -222,7 +229,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             if node.addr == group.addr:
                 # the node is a phantom one and must be converted to a non phantom
                 if node.is_phantom:
-                    node.phantom_to_node(self._current.function.transition_graph, group)
+                    l.info(f"Converting phantom node {hex(node.addr)} to real node")
+                    node.phantom_to_node(group)
                     working = node
                 else:
                     # TODO: handle self modifying code at the same address location
@@ -235,11 +243,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
             # TODO: make get any node return a list of nodes and not a single node
             else:
+                l.info(f"Splitting node")
                 working = self.split_node(node, group)
 
         else:
             # there isn't any node with the address of the current group
             # just create a new node
+            l.info(f"Creating new Basic Block for target {hex(group.addr)}")
             node = BasicBlock(group.addr, group.size, self._current.function.transition_graph, irsb=group)
             # check for the beginning of the program
             if working is not None:
@@ -248,6 +258,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         self._current.working = working
 
+        assert self._current.working is not None
         return     
 
 
@@ -276,9 +287,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                     node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
                     if node is not None:
                         assert isinstance(node, BasicBlock)
+                        l.info(f"Found basic block for target {hex(t)} with head {hex(node.addr)}")
                         if not node.is_phantom and node.addr != t:
                             node = self.split_node(node, t)
                     else:
+                        l.info(f"Creating phantom node for target {hex(t)}")
                         node = BasicBlock(addr = t, is_phantom = True)
                         self.model.add_node(t, node)
                     self._current.function._transit_to(working, node)                       
@@ -306,14 +319,17 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 
                 self.functions._add_call_to(self._current.function.addr, working, target, \
                     phantom_return, ins_addr = callsite_address
-                    )           
+                    )    
+
+                l.info(hex(callsite_address) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
                 if self._callstack is None:
-                    self._callstack = CallStack(callsite_address, target, ret_addr=return_address, current=self._current)
+                    self._callstack = CallStack(callsite_address, target, ret_addr=return_address, current=copy(self._current))
 
                 else:
                     self._callstack = self._callstack.call(callsite_address, target, retn_target=return_address,
-                                current=self._current)
+                                current=copy(self._current))
+                
 
                         
                 self._current.set_function(called)
@@ -321,15 +337,18 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 # "hello code find the node in the cfg"
                 self._current.working = self.model.get_node(target)
 
-                l.info(hex(callsite_address) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
+
+                
+
 
             else:
                 l.warning("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
         
         elif jumpkind == 'Ijk_Ret' and self._callstack is not None:
             # TODO: find out if the edges to be addedd are necessary 
+            
             l.info("Returning to " + hex(target))
-            #7working.pp()
+
             try:
                 returned = self._callstack
                 self._callstack = self._callstack.ret(target)
@@ -338,8 +357,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 pass
             except SimEmptyCallStackError:
                 l.warning("Stack empty")
-            except AttributeError:
-                IPython.embed()
+
+                
 
 
         
@@ -356,6 +375,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         # Before going into the new job, there is the need to process the type
         # of the jumpkind of the current working basic block w.r.t the head address
         # of the new basic block
+
 
         self.process_type(head)        
         new_job = CFGJob(head, None, next_ip, irsb, thread = job.thread)

@@ -115,7 +115,7 @@ class BasicBlock(CodeNode):
 				return self._irsb.statements[idx+1] if idx + 1 < len(self._irsb.statements) else None
 		
 	
-	def phantom_to_node(self, graph, irsb, thumb = False):
+	def phantom_to_node(self, irsb, thumb = False):
 		assert self.is_phantom
 		self.addr = irsb.addr
 		self.size = irsb.size
