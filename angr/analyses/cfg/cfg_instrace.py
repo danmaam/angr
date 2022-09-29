@@ -187,9 +187,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         return block_head, irsb, next_ip
 
 
-    def range(self, addr):
-        return self._low_img <= addr and addr <= self._high_img
-
     def _pre_analysis(self):
         # build basic blocks from the instruction trace
         # need to emulate the trace for each thread
@@ -239,6 +236,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         group : pyvex.IRSB = job.block_irsb
         working : BasicBlock = self._current.working
 
+
         # search for a node at the same address in the model
         node : BasicBlock = self.model.get_any_node(addr = group.addr, anyaddr = True)
 
@@ -253,17 +251,18 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                     working = node
                 else:
                     # TODO: handle self modifying code at the same address location
-                    while node._irsb == 'Ijk_Splitted':
-                        node = node.next
+                    while node._irsb.jumpkind == 'Ijk_Splitted':
+
+                        successors = node.successors()
+                        assert len(successors) == 1
+
+                        node = successors[0]                        
 
                     working = node
-
-            # jump in middle of a function
 
             # TODO: differentiate between jump in middle of funciton or jump not to the first instruction \
             # of a block
 
-            # TODO: make get any node return a list of nodes and not a single node
             else:
                 working = self.split_node(node, group.addr)
 
@@ -309,22 +308,39 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         return b
     
-    def should_call_be_tracked(self, target):
+    def should_target_be_tracked(self, target):
         for (x,y) in self.avoided_addresses.items():
             if x <= target and target < y:
                 return False
         return True
 
-    def process_type(self, target):
-        
+    def process_type(self, target, job):
+
         working : BasicBlock = self._current.working
         jumpkind = working._irsb.jumpkind
 
+        if target == 0x7FF7CE25DCC4:
+            breakpoint()
 
         if jumpkind == 'Ijk_Boring':
             # handles all the jumps (conditional or not) found
             jump_targets = working._irsb.constant_jump_targets.copy()
             jump_targets.add(target)
+
+
+            # check if we are in a jump stub for an external function call
+            # TODO: try to load all the involved PEs to get the function address to correctly identify function call
+
+            if len(jump_targets) == 1 and not self.should_target_be_tracked(target):
+                self._current.function.add_jumpout_site(self._current.working)
+
+                prev_kek = self._callstack.ret_addr
+                prev = self._callstack.current
+                prev.function.add_jumpout_site(prev.working)
+                self._callstack = self._callstack.pop()
+                prev.function._fakeret_to(prev.working, self._current.function)
+                l.warning(f"rax dispatcher, popping {hex(prev_kek)}")
+                return
 
             for t in jump_targets:
                 if t != target:
@@ -348,7 +364,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             callsite_address = working._irsb.instruction_addresses[-1]
 
 
-            if self.should_call_be_tracked(target):
+            if self.should_target_be_tracked(target):
 
                 # Register the call site in the current function            
                 called = self.functions.function(target, create = True)
@@ -383,10 +399,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 # "hello code find the node in the cfg"
                 self._current.working = self.model.get_node(target) 
 
-
-                
-
-
             else:
                 l.info("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
         
@@ -397,10 +409,16 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             l.info("Returning to " + hex(target))
 
             try:
+                # pop until the return address is found
                 returned = self._callstack
 
-                # if (returned.ret_addr != target):
-                #     IPython.embed()
+                # while returned.ret_addr != target:
+                #     c = returned.current
+                #     c.function._fake
+
+
+                returned = self._callstack
+
 
                 if (returned.ret_addr != target):
                     IPython.embed()
@@ -439,7 +457,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         # of the new basic block
 
 
-        self.process_type(target)        
+        self.process_type(target, job)        
         new_job = CFGJob(head, None, next_ip, irsb, thread = job.thread)
 
         return [new_job]
