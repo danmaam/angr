@@ -6,6 +6,9 @@ import itertools
 from collections import defaultdict
 from typing import Union, Optional, Iterable, Set, Generator
 from typing import Type # For some reasons the linter doesn't recognize the use in apply_definition but PyCharm needs it imported to correctly recognize it # pylint: disable=unused-import
+import pyvex
+import IPython
+
 
 from itanium_demangler import parse
 
@@ -867,32 +870,41 @@ class Function(Serializable):
         self._call_sites[call_site_addr] = (call_target_addr, retn_addr)
 
 
-    def _split_node(self, node, split_addr):
+    def _split_node(self, node, split_addr, car_bytecode, cdr_bytecode):
         #TODO: insert assert of node in transition_graph
-        assert node.addr < split_addr and split_addr <= node.addr + node.size
+        # assert the address of splitting is in range of the irsb
 
-        #find the split point
-        split_idx = [idx for (idx, elem) in enumerate(node.irsb.statements) if hasattr(elem, 'addr') and elem.addr == split_addr][0]
+        l.info("Splitting node at " + hex(split_addr))
+        assert node._irsb.addr < split_addr and split_addr <= node._irsb.addr + node._irsb.size
 
-        (car, cdr) = (node.irsb.statements[:split_idx], node.irsb.statements[split_idx:])
+        # create the twos new IRSBs
+        car_irsb = pyvex.lift(car_bytecode, node._irsb.addr, archinfo.ArchAMD64())
+        cdr_irsb = pyvex.lift(cdr_bytecode, split_addr, archinfo.ArchAMD64())
 
-        car_irsb = node.empty_block(archinfo.ArchAMD64(), node.addr, car)
-        cdr_irsb = node.empty_block(archinfo.ArchAMD64(), split_addr, cdr, jumpkind = node.jumpkind)
+        # set the jumpkind and the next field of the first IRSB
+        car_irsb.next = cdr_irsb
+        car_irsb.jumpkind = 'Ijk_Splitted'
 
-        node_1 = BasicBlock(node.addr, car_irsb.size, self.transition_graph, irsb = car_irsb)
-        node_2 = BasicBlock(split_addr, cdr_irsb.size, self.transition_graph, irsb = cdr_irsb)
+
+        # create the new basic blocks
+        car_bb = BasicBlock(car_irsb.addr, car_irsb.size, self.transition_graph, irsb=car_irsb)
+        cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self.transition_graph, irsb=cdr_irsb)
 
         # fix edges in the graph
-        for pred in node.predecessors:
-            self.transition_graph.remove_edge(pred, node)
-            self._transit_to(pred, node_1)
-        
-        for succ in node.successors:
-            self._transit_to(node_2, succ)
+        for s in node.successors():
+            self.transition_graph.remove_edge(node, s)
+            self.transition_graph.add_edge(cdr_bb, s)
 
-        self._transit_to(node_1, node_2)
+        try:
+            for p in node.predecessors():
+                self.transition_graph.remove_edge(p, node)
+                self.transition_graph.add_edge(p, car_bb)
+        except:
+            IPython.embed()
 
-        return (node_1, node_2)
+        self._transit_to(car_bb, cdr_bb)
+
+        return (car_bb, cdr_bb)
             
 
     def _add_endpoint(self, endpoint_node, sort):

@@ -1,6 +1,7 @@
 from collections import defaultdict
 from dis import Instruction
 from inspect import trace
+from multiprocessing.sharedctypes import Value
 from sqlite3 import Timestamp
 from typing import Dict, List, Optional
 import collections
@@ -36,9 +37,10 @@ import IPython
 l = logging.getLogger(name=__name__)
 
 
-    
+# TODO: TI PREGO TROVA UN MODO MIGLIORE DI FARE IL BLOCK SPLIT FA SCHIFO
+lifted = {}
 
-
+splitted = set()
 class CFGJob():
     def __init__(self, addr: int, node: CFGNode, destination: int, block_irsb : pyvex.IRSB,
                  last_addr: Optional[int] = None,
@@ -55,6 +57,8 @@ class CFGJob():
         self.syscall = syscall
         self.block_irsb = block_irsb
         self.thread = thread
+
+        
 
 class CFGInstrace(ForwardAnalysis, CFGBase):
     """
@@ -77,10 +81,18 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         def pp(self):
             print(hex(self.working.addr))
 
+    # Load the set of instructions that shouldn't be tracked
+    def load_libraries(self, x):
+        with open(x, "rb") as f:
+            content = f.read()
+            chunks = [content[t:t + 16] for t in range(0, len(content), 16)]
+            for c in chunks:
+                addr = struct.unpack('<q', c[:8])[0]
+                size = struct.unpack('<q', c[8:])[0]
+                self.avoided_addresses[addr] = addr + size
 
 
-
-    def __init__(self, trace, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None):
+    def __init__(self, trace, to_avoid_functions, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None):
         ForwardAnalysis.__init__(self, allow_merging=False)
         CFGBase.__init__(
             self,
@@ -104,6 +116,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         with open(trace, "rb") as trace_stream:
             buf = trace_stream.read()
             self._ins_trace = json.loads(buf)
+        
+        self.avoided_addresses = {}
+        self.load_libraries(to_avoid_functions)
+        print(self.avoided_addresses)
+
+        self.lift_cache = {}
 
         self._analyze()
 
@@ -111,7 +129,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         self._low_img = 0x5616e85e4000
         self._high_img = 0x55b5326c9ab8
 
+        
+
         # self.project.loader._instruction_map
+
+
 
     def next_irsb_block(self, tid, ts):
         
@@ -119,11 +141,16 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         th_trace = self._ins_trace['thread_exec_trace'][tid]
     
-
         instructions = []
 
         while True:
-            current_instruction = th_trace.pop(0)
+            try:
+                current_instruction = th_trace.pop(0)
+            except IndexError:
+                self._should_abort = True
+                print("porcodio ho finito")
+                return (-1,-1,-1)
+
             block_head = current_instruction['address'] if block_head is None else block_head
             
             instructions.append(self.project.loader._instruction_map[current_instruction['address']][ts])
@@ -134,10 +161,19 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
                 bytecode = b''.join(instructions)
                 
-                irsb = pyvex.lift(bytecode, block_head,
-                                  archinfo.ArchAMD64())
+                # check if the block is in lift cache
+                if block_head in self.lift_cache.keys():
+                    irsb = self.lift_cache[block_head]
+                
+                else: 
+                    irsb = pyvex.lift(bytecode, block_head,
+                                    archinfo.ArchAMD64())
+                    self.lift_cache[block_head] = irsb
+
 
                 next_ip = current_instruction['destination']
+
+                lifted[block_head] = bytecode
 
                 #FOR DEBUGGING PURPOSES
                 # md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
@@ -166,6 +202,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         # First try with trace at timestamp 0 and thread 0
         (block_head, irsb, next_ip) = self.next_irsb_block('0', 0)
 
+
         # Create the current function in the Function Manager
         initial = self.functions.function(
             addr=block_head, create=True)
@@ -190,31 +227,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         self._insert_job(new_job)
 
 
-    def split_irsb(self, irsb, split_addr):
-        l.info("Splitting @" + hex(split_addr))
-        # assert the address of splitting is in range of the irsb
-        assert irsb.addr < split_addr and split_addr <= irsb.addr + irsb.size
-
-        #find the split point
-        split_idx = [idx for (idx, elem) in enumerate(irsb.statements) if hasattr(elem, 'addr') and elem.addr == split_addr][0]
-
-        (car, cdr) = (irsb.statements[:split_idx], irsb.statements[split_idx:])
-
-        # create the irsbs
-        car_irsb = irsb.empty_block(archinfo.ArchAMD64(), irsb.addr, car)
-        cdr_irsb = irsb.empty_block(archinfo.ArchAMD64(), split_addr, cdr, jumpkind = irsb.jumpkind)
-
-        # create the new basic blocks
-        car_bb = BasicBlock(car_irsb.addr, car_irsb.size, self._current.function.transition_graph, irsb=car_irsb)
-        cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self._current.function.transition_graph, irsb=cdr_irsb)
-
-        return (car_bb, cdr_bb)
 
     def _job_key(self, job):
         return job.addr
 
     def _job_queue_empty(self) -> None:
-        l.info("Job queue is empty. Stopping.")
+        l.debug("Job queue is empty. Stopping.")
 
 
     def _pre_job_handling(self, job: CFGJob) -> None:
@@ -226,30 +244,33 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         if node is not None:
             # compare the found node with the current group
+
             if node.addr == group.addr:
                 # the node is a phantom one and must be converted to a non phantom
                 if node.is_phantom:
-                    l.info(f"Converting phantom node {hex(node.addr)} to real node")
+                    l.debug(f"Converting phantom node {hex(node.addr)} to real node")
                     node.phantom_to_node(group)
                     working = node
                 else:
                     # TODO: handle self modifying code at the same address location
-                    assert node._irsb == group
+                    while node._irsb == 'Ijk_Splitted':
+                        node = node.next
+
+                    working = node
 
             # jump in middle of a function
+
             # TODO: differentiate between jump in middle of funciton or jump not to the first instruction \
             # of a block
 
-
             # TODO: make get any node return a list of nodes and not a single node
             else:
-                l.info(f"Splitting node")
-                working = self.split_node(node, group)
+                working = self.split_node(node, group.addr)
 
         else:
             # there isn't any node with the address of the current group
             # just create a new node
-            l.info(f"Creating new Basic Block for target {hex(group.addr)}")
+            l.debug(f"Creating new Basic Block for target {hex(group.addr)}")
             node = BasicBlock(group.addr, group.size, self._current.function.transition_graph, irsb=group)
             # check for the beginning of the program
             if working is not None:
@@ -264,12 +285,35 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
     def split_node(self, node, target) -> BasicBlock :
-        (a, b) = self.split_irsb(node._irsb, target)
+        l.debug(f"Splitting node at {hex(target)}")
+        
+        bytecode = lifted[node.addr]
+        offset = target - node._irsb.addr
+
+        car_bytecode = bytecode[:offset]
+        cdr_bytecode = bytecode[offset:]
+
+        # split the node
+        (a, b) =  self._current.function._split_node(node, target, car_bytecode, cdr_bytecode)
+
+        # update the lifted bytecode
+        lifted[node._irsb.addr] = car_bytecode
+        lifted[target] = cdr_bytecode
+
         self.model.remove_node(node.addr, node)
         self.model.add_node(a.addr, a)
         self.model.add_node(b.addr, b)
+
+        splitted.add(a.addr)
+        splitted.add(b.addr)
+
         return b
-        
+    
+    def should_call_be_tracked(self, target):
+        for (x,y) in self.avoided_addresses.items():
+            if x <= target and target < y:
+                return False
+        return True
 
     def process_type(self, target):
         
@@ -287,11 +331,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                     node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
                     if node is not None:
                         assert isinstance(node, BasicBlock)
-                        l.info(f"Found basic block for target {hex(t)} with head {hex(node.addr)}")
+                        l.debug(f"Found basic block for target {hex(t)} with head {hex(node.addr)}")
                         if not node.is_phantom and node.addr != t:
                             node = self.split_node(node, t)
                     else:
-                        l.info(f"Creating phantom node for target {hex(t)}")
+                        l.debug(f"Creating phantom node for target {hex(t)}")
                         node = BasicBlock(addr = t, is_phantom = True)
                         self.model.add_node(t, node)
                     self._current.function._transit_to(working, node)                       
@@ -301,13 +345,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         elif jumpkind == 'Ijk_Call':
             # Check if it's a call to a library function
             return_address = working.addr + working.size
-            # TODO: for the future myself: you don't want to find the address of call by accessing to the last address, 
-            # trust me, you don't want to do that, you will regret of this piece of code you wrote
             callsite_address = working._irsb.instruction_addresses[-1]
 
 
-            # TODO: dump from pin API call instead of this horrible check 
-            if target != return_address:
+            if self.should_call_be_tracked(target):
+
                 # Register the call site in the current function            
                 called = self.functions.function(target, create = True)
 
@@ -332,25 +374,40 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 
 
                         
-                self._current.set_function(called)
+                self._current.function = called
+
+                assert called.addr == target
+
+
                 # TODO: find a better way to find the entry point of the function instead of a crap 
                 # "hello code find the node in the cfg"
-                self._current.working = self.model.get_node(target)
+                self._current.working = self.model.get_node(target) 
 
 
                 
 
 
             else:
-                l.warning("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
+                l.info("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
         
         elif jumpkind == 'Ijk_Ret' and self._callstack is not None:
             # TODO: find out if the edges to be addedd are necessary 
-            
+            self._current.function._add_return_site(self._current.working)
+
             l.info("Returning to " + hex(target))
 
             try:
                 returned = self._callstack
+
+                # if (returned.ret_addr != target):
+                #     IPython.embed()
+
+                if (returned.ret_addr != target):
+                    IPython.embed()
+                assert returned.ret_addr == target
+
+
+
                 self._callstack = self._callstack.ret(target)
                 self._current = returned.current
                 
@@ -370,14 +427,19 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     # From the execution trace, detects and create the next IR group to be processed
     def _get_successors(self, job: CFGJob) -> List[CFGJob]:
 
+        target = job.destination
+
+        #TODO: don't return -1 just to end the process
         (head, irsb, next_ip) = self.next_irsb_block(job.thread, 0)
+        if self.should_abort:
+            return []
 
         # Before going into the new job, there is the need to process the type
         # of the jumpkind of the current working basic block w.r.t the head address
         # of the new basic block
 
 
-        self.process_type(head)        
+        self.process_type(target)        
         new_job = CFGJob(head, None, next_ip, irsb, thread = job.thread)
 
         return [new_job]
@@ -394,6 +456,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
     def _intra_analysis(self):
         return
+
+    def _post_analysis(self) -> None:
+        IPython.embed()
 
 
 AnalysesHub.register_default('CFGInstrace', CFGInstrace)

@@ -25,6 +25,7 @@ class CodeNode:
 
 		self._hash = None
 
+
 	def __len__(self):
 		return self.size
 
@@ -74,6 +75,8 @@ class BasicBlock(CodeNode):
 			assert graph is not None and irsb is not None
 			if irsb is not None:
 				assert isinstance(irsb, pyvex.IRSB)
+
+				graph.add_node(self)
 				self._irsb = irsb
 			else:
 				self._irsb = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr = addr, jumpkind='Ijk_NoDecode')
@@ -122,6 +125,7 @@ class BasicBlock(CodeNode):
 		self.thumb = thumb
 		self._irsb = irsb
 		self.is_phantom = False
+		self._graph.add_node(self)
 
 	def pp(self):
 		self._irsb.pp()
