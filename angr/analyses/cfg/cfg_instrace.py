@@ -10,6 +10,7 @@ import sys
 
 # LAST BASE: 0x7ff6153c0000
 
+
 from sympy import false, true
 import angr
 
@@ -155,7 +156,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             
             instructions.append(self.project.loader._instruction_map[current_instruction['address']][ts])
 
-
             if 'destination' in current_instruction.keys():
                 # end of the basic block, lift it to IRSB
 
@@ -168,24 +168,29 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 else: 
                     irsb = pyvex.lift(bytecode, block_head,
                                     archinfo.ArchAMD64())
+
+                    while (irsb.size != len(bytecode)):
+                        # TODO: find a solution to pyvex not lifting each part of bytecode
+                        temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
+                        irsb.extend(temp)
+
                     self.lift_cache[block_head] = irsb
 
 
                 next_ip = current_instruction['destination']
-
-                lifted[block_head] = bytecode
-
-                #FOR DEBUGGING PURPOSES
-                # md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
-                # for i in md.disasm(bytecode, block_head):
-                #     sys.stderr.write("0x%x:\t%s\t%s\n" % (i.address, i.mnemonic, i.op_str))
-                # sys.stderr.write("\n")
-                
+                lifted[block_head] = bytecode                
                 break
             
 
         return block_head, irsb, next_ip
 
+
+    def disasm(self, bytecode, block_head):
+        #FOR DEBUGGING PURPOSES
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        for i in md.disasm(bytecode, block_head):
+            sys.stderr.write("0x%x:\t%s\t%s\n" % (i.address, i.mnemonic, i.op_str))
+        sys.stderr.write("\n")
 
     def _pre_analysis(self):
         # build basic blocks from the instruction trace
@@ -242,7 +247,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         if node is not None:
             # compare the found node with the current group
-
             if node.addr == group.addr:
                 # the node is a phantom one and must be converted to a non phantom
                 if node.is_phantom:
@@ -283,9 +287,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 
-    def split_node(self, node, target) -> BasicBlock :
-        l.debug(f"Splitting node at {hex(target)}")
-        
+    def split_node(self, node, target) -> BasicBlock :        
         bytecode = lifted[node.addr]
         offset = target - node._irsb.addr
 
@@ -319,8 +321,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         working : BasicBlock = self._current.working
         jumpkind = working._irsb.jumpkind
 
-        if target == 0x7FF7CE25DCC4:
-            breakpoint()
+        # if target == 0x7FF7CE25DCC4:
+        #     breakpoint()
 
         if jumpkind == 'Ijk_Boring':
             # handles all the jumps (conditional or not) found
@@ -339,7 +341,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 prev.function.add_jumpout_site(prev.working)
                 self._callstack = self._callstack.pop()
                 prev.function._fakeret_to(prev.working, self._current.function)
-                l.warning(f"rax dispatcher, popping {hex(prev_kek)}")
+                l.debug(f"rax dispatcher, popping {hex(prev_kek)}")
                 return
 
             for t in jump_targets:
@@ -370,16 +372,21 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 called = self.functions.function(target, create = True)
 
                 # Try to calculate the return from the call, so that it's possible to create the phantom node
-                phantom_return = BasicBlock(return_address, is_phantom = True)
+                
+                # Search for return node in model. If it doesn't exist, create a phantom one
+                return_node = self.model.get_node(return_address)
 
-                self.model.add_node(return_address, phantom_return)
-                self._current.function._transit_to(working, phantom_return)
+                if return_node is None:
+                    return_node = BasicBlock(return_address, graph = self._current.function.transition_graph, is_phantom = True)
+                    self.model.add_node(return_address, return_node)
+
+                self._current.function._transit_to(working, return_node)
                 
                 self.functions._add_call_to(self._current.function.addr, working, target, \
-                    phantom_return, ins_addr = callsite_address
+                    return_node, ins_addr = callsite_address
                     )    
 
-                l.info(hex(callsite_address) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
+                l.debug(hex(callsite_address) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
                 if self._callstack is None:
                     self._callstack = CallStack(callsite_address, target, ret_addr=return_address, current=copy(self._current))
@@ -400,13 +407,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 self._current.working = self.model.get_node(target) 
 
             else:
-                l.info("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
+                l.debug("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
         
         elif jumpkind == 'Ijk_Ret' and self._callstack is not None:
             # TODO: find out if the edges to be addedd are necessary 
             self._current.function._add_return_site(self._current.working)
 
-            l.info("Returning to " + hex(target))
+            l.debug("Returning to " + hex(target))
 
             try:
                 # pop until the return address is found
@@ -420,8 +427,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 returned = self._callstack
 
 
-                if (returned.ret_addr != target):
-                    IPython.embed()
                 assert returned.ret_addr == target
 
 
@@ -476,7 +481,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         return
 
     def _post_analysis(self) -> None:
-        IPython.embed()
+        print("End of analysis!")
 
 
 AnalysesHub.register_default('CFGInstrace', CFGInstrace)

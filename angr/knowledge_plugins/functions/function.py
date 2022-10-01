@@ -885,22 +885,24 @@ class Function(Serializable):
         car_irsb.next = cdr_irsb
         car_irsb.jumpkind = 'Ijk_Splitted'
 
-
         # create the new basic blocks
         car_bb = BasicBlock(car_irsb.addr, car_irsb.size, self.transition_graph, irsb=car_irsb)
         cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self.transition_graph, irsb=cdr_irsb)
 
-        # fix edges in the graph
-        for s in node.successors():
-            self.transition_graph.remove_edge(node, s)
-            self.transition_graph.add_edge(cdr_bb, s)
-
         try:
-            for p in node.predecessors():
-                self.transition_graph.remove_edge(p, node)
-                self.transition_graph.add_edge(p, car_bb)
-        except:
+            for s in node.successors():
+                self.transition_graph.remove_edge(node, s)
+                self.transition_graph.add_edge(cdr_bb, s)
+        except Exception as e:
+            print(repr(e))
             IPython.embed()
+
+
+        for p in node.predecessors():
+            self.transition_graph.remove_edge(p, node)
+            self.transition_graph.add_edge(p, car_bb)
+
+
 
         self._transit_to(car_bb, cdr_bb)
 
