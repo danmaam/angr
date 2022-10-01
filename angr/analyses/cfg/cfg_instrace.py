@@ -3,6 +3,7 @@ from dis import Instruction
 from inspect import trace
 from multiprocessing.sharedctypes import Value
 from sqlite3 import Timestamp
+from sre_parse import State
 from typing import Dict, List, Optional
 import collections
 from copy import copy
@@ -36,6 +37,8 @@ import archinfo
 import IPython
 
 l = logging.getLogger(name=__name__)
+if sys.argv[1]:
+    l.setLevel(logging.getLevelName(sys.argv[1]))
 
 
 # TODO: TI PREGO TROVA UN MODO MIGLIORE DI FARE IL BLOCK SPLIT FA SCHIFO
@@ -69,9 +72,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     tag = 'CFGInstrace'
 
     class State:
-        def __init__(self):
-            self.function = None
-            self.working = None
+        def __init__(self, function = None, working = None):
+            self.function = function
+            self.working = working
 
         def set_function(self, fun):
             self.function = fun
@@ -128,11 +131,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         # shitty hacks just to test the code working
         self._low_img = 0x5616e85e4000
-        self._high_img = 0x55b5326c9ab8
-
-        
-
-        # self.project.loader._instruction_map
+        self._high_img = 0x55b5326c9ab8        
 
 
 
@@ -209,20 +208,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         initial = self.functions.function(
             addr=block_head, create=True)
 
-        # Sets as none the entry point of the function
-        function_entry = None     
 
         # create the self._current pair
-        self._current = self.State()
-        self._current.function = initial
-        self._current.working = function_entry
+        self._current = self.State(function = initial)
 
-        # TODO: decomment the following code
-        # create in the cfg the entry for this first function
-
-        # node = CFGNode(block_head, len(
-        #     bytecode), self.model, irsb=irsb)
-        # self.model.add_node(block_head, node)
 
         new_job = CFGJob(
             block_head, None, next_ip, block_irsb=irsb)
@@ -236,13 +225,15 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     def _job_queue_empty(self) -> None:
         l.debug("Job queue is empty. Stopping.")
 
-
+    # TODO: check if splitting works with call in the same function
     def _pre_job_handling(self, job: CFGJob) -> None:
         group : pyvex.IRSB = job.block_irsb
         working : BasicBlock = self._current.working
 
 
         # search for a node at the same address in the model
+        assert len(self.model.get_all_nodes(addr = group.addr, anyaddr = True)) <= 1
+
         node : BasicBlock = self.model.get_any_node(addr = group.addr, anyaddr = True)
 
         if node is not None:
@@ -250,7 +241,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             if node.addr == group.addr:
                 # the node is a phantom one and must be converted to a non phantom
                 if node.is_phantom:
-                    l.debug(f"Converting phantom node {hex(node.addr)} to real node")
                     node.phantom_to_node(group)
                     working = node
                 else:
@@ -273,8 +263,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         else:
             # there isn't any node with the address of the current group
             # just create a new node
-            l.debug(f"Creating new Basic Block for target {hex(group.addr)}")
+            #l.debug(f"Creating new Basic Block for target {hex(group.addr)}")
             node = BasicBlock(group.addr, group.size, self._current.function.transition_graph, irsb=group)
+
+
+            self.model.add_node(node.addr, node)
             # check for the beginning of the program
             if working is not None:
                 self._current.function._transit_to(working, node)
@@ -287,7 +280,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 
-    def split_node(self, node, target) -> BasicBlock :        
+    def split_node(self, node, target) -> BasicBlock :       
+
+
+
         bytecode = lifted[node.addr]
         offset = target - node._irsb.addr
 
@@ -318,6 +314,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
     def process_type(self, target, job):
 
+        l.info(f"PROCESS_TYPE: function: {hex(self._current.function.addr)}, working : {hex(self._current.working.addr)}, target: {hex(target)}")
+
         working : BasicBlock = self._current.working
         jumpkind = working._irsb.jumpkind
 
@@ -325,36 +323,48 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         #     breakpoint()
 
         if jumpkind == 'Ijk_Boring':
-            # handles all the jumps (conditional or not) found
+            # get all the possible jump targets from the current block
             jump_targets = working._irsb.constant_jump_targets.copy()
             jump_targets.add(target)
 
 
             # check if we are in a jump stub for an external function call
-            # TODO: try to load all the involved PEs to get the function address to correctly identify function call
 
             if len(jump_targets) == 1 and not self.should_target_be_tracked(target):
+
+                # breakpoint()
+                
+                # TODO: check if it's necessarty to add a new edge 
                 self._current.function.add_jumpout_site(self._current.working)
 
-                prev_kek = self._callstack.ret_addr
-                prev = self._callstack.current
-                prev.function.add_jumpout_site(prev.working)
+
+                # get stub function from call stack and pop the callstack
+                (caller, working_bb, ret_addr) = (self._callstack.current.function, self._callstack.current.working, self._callstack.ret_addr)
+
                 self._callstack = self._callstack.pop()
-                prev.function._fakeret_to(prev.working, self._current.function)
-                l.debug(f"rax dispatcher, popping {hex(prev_kek)}")
+                # add a fake return from the stub to the caller of the stub
+                self._current.function._fakeret_to(self._current.working, caller)
+
+                self._current = self.State(function=caller, working=working_bb)
+
+
+                l.debug(f"Rax dispatcher, popping {hex(ret_addr)}")
+                l.debug(f"Function: {hex(self._current.function.addr)}, {hex(self._current.working.addr)}")
                 return
+
 
             for t in jump_targets:
                 if t != target:
+                    assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
                     node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
+
                     if node is not None:
                         assert isinstance(node, BasicBlock)
-                        l.debug(f"Found basic block for target {hex(t)} with head {hex(node.addr)}")
                         if not node.is_phantom and node.addr != t:
                             node = self.split_node(node, t)
                     else:
-                        l.debug(f"Creating phantom node for target {hex(t)}")
-                        node = BasicBlock(addr = t, is_phantom = True)
+                        node = BasicBlock(addr = t, graph=self._current.function.transition_graph, is_phantom = True)
+
                         self.model.add_node(t, node)
                     self._current.function._transit_to(working, node)                       
 
@@ -374,10 +384,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 # Try to calculate the return from the call, so that it's possible to create the phantom node
                 
                 # Search for return node in model. If it doesn't exist, create a phantom one
+                assert len(self.model.get_all_nodes(addr = return_address, anyaddr = True)) <= 1
                 return_node = self.model.get_node(return_address)
 
                 if return_node is None:
                     return_node = BasicBlock(return_address, graph = self._current.function.transition_graph, is_phantom = True)
+
                     self.model.add_node(return_address, return_node)
 
                 self._current.function._transit_to(working, return_node)
@@ -389,22 +401,20 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 l.debug(hex(callsite_address) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
                 if self._callstack is None:
-                    self._callstack = CallStack(callsite_address, target, ret_addr=return_address, current=copy(self._current))
+                    self._callstack = CallStack(callsite_address, target, ret_addr=return_address, current=self._current)
 
                 else:
                     self._callstack = self._callstack.call(callsite_address, target, retn_target=return_address,
-                                current=copy(self._current))
+                                current=self._current)
+
                 
+                
+                self._current = self.State(function=called, working=self.model.get_node(target))
+                assert self._current.function.addr == target
 
-                        
-                self._current.function = called
-
-                assert called.addr == target
-
-
-                # TODO: find a better way to find the entry point of the function instead of a crap 
-                # "hello code find the node in the cfg"
-                self._current.working = self.model.get_node(target) 
+                # TODO: handle calls in the middle of a block
+                # TODO: check if everything works without this assignment
+                # self._current.working = self.model.get_node(target) 
 
             else:
                 l.debug("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
@@ -416,23 +426,23 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             l.debug("Returning to " + hex(target))
 
             try:
-                # pop until the return address is found
-                returned = self._callstack
-
                 # while returned.ret_addr != target:
                 #     c = returned.current
                 #     c.function._fake
 
 
-                returned = self._callstack
+                (func, working_bb) = (self._callstack.current.function, self._callstack.current.working)
 
-
-                assert returned.ret_addr == target
-
-
-
+                assert self._callstack.ret_addr == target
+                
                 self._callstack = self._callstack.ret(target)
-                self._current = returned.current
+                self._current = self.State(function=func, working=working_bb)
+
+                # for debug purposes
+                # TODO: delete these lines
+                node = self.model.get_node(target)
+                assert node in self._current.function.nodes
+                
                 
                 pass
             except SimEmptyCallStackError:

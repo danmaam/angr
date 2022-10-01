@@ -71,8 +71,9 @@ class CodeNode:
 class BasicBlock(CodeNode):
 	def __init__(self, addr=0, size=0, graph=None, thumb=False, irsb:pyvex.IRSB=None, instructions=None, is_phantom=False):
 		super().__init__(addr, size, graph=graph, thumb=thumb)
+		assert graph is not None
 		if not is_phantom:
-			assert graph is not None and irsb is not None
+			assert irsb is not None
 			if irsb is not None:
 				assert isinstance(irsb, pyvex.IRSB)
 
@@ -81,9 +82,8 @@ class BasicBlock(CodeNode):
 			else:
 				self._irsb = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr = addr, jumpkind='Ijk_NoDecode')
 				
-
-
-			self._graph.add_node(self)
+		# TODO: check if it's necessary to add the node before adding an edge
+		# self._graph.add_node(self)
 
 		self.is_phantom = is_phantom
 
@@ -125,7 +125,10 @@ class BasicBlock(CodeNode):
 		self.thumb = thumb
 		self._irsb = irsb
 		self.is_phantom = False
-		self._graph.add_node(self)
+
+		# TODO: phantom node should be in model even when it's created \
+		# delete this line if bug fixes
+		# self._graph.add_node(self)
 
 	def pp(self):
 		self._irsb.pp()
