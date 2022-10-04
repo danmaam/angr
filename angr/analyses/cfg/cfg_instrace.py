@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dis import Instruction
+from importlib.machinery import BYTECODE_SUFFIXES
 from inspect import trace
 from multiprocessing.sharedctypes import Value
 from sqlite3 import Timestamp
@@ -186,7 +187,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                     next_ip = dst
                     exit_sp = sp
                     # TODO: allow relifting without saving twice the bytecode
-                    lifted[block_head] = bytecode                
+                    lifted[block_head] = bytecode 
+                    self.disasm(bytecode, block_head)               
                     break
 
             else:
@@ -344,7 +346,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     def process_type(self, target, job):
         
         tid = job.tid
-        l.info(f"PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
+        l.info(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
 
 
         
@@ -451,7 +453,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                     return_node, ins_addr = rip
                     )    
 
-                l.debug(hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
+                l.debug(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
                 if self._callstack[tid] is None:
                     self._callstack[tid] = CallStack(rip, target, ret_addr=return_address, current=self._current[tid])
@@ -474,7 +476,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             # TODO: find out if the edges to be addedd are necessary 
             self._current[tid].function._add_return_site(self._current[tid].working)
 
-            l.debug("Returning to " + hex(target))
+            l.debug(f"TID {tid}: Returning to " + hex(target))
 
             try:
                 if not self.should_target_be_tracked(target):
@@ -483,7 +485,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
                 (func, working_bb) = (self._callstack[tid].current.function, self._callstack[tid].current.working)
 
-                assert self._callstack[tid].ret_addr == target
+                assert self._callstack[tid].ret_addr == target, IPython.embed()
                 
                 self._callstack[tid] = self._callstack[tid].ret(target)
                 self._current[tid] = self.State(function=func, working=working_bb)
