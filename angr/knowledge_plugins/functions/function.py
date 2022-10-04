@@ -887,7 +887,7 @@ class Function(Serializable):
 
         # create the new basic blocks
         car_bb = BasicBlock(car_irsb.addr, car_irsb.size, self.transition_graph, irsb=car_irsb)
-        cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self.transition_graph, irsb=cdr_irsb)
+        cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self.transition_graph, irsb=cdr_irsb, exit_sp=node.exit_sp)
 
         try:
             for s in node.successors():

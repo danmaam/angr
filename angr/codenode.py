@@ -69,7 +69,7 @@ class CodeNode:
 
 
 class BasicBlock(CodeNode):
-	def __init__(self, addr=0, size=0, graph=None, thumb=False, irsb:pyvex.IRSB=None, instructions=None, is_phantom=False):
+	def __init__(self, addr=0, size=0, graph=None, thumb=False, irsb:pyvex.IRSB=None, instructions=None, is_phantom=False, exit_sp=None):
 		super().__init__(addr, size, graph=graph, thumb=thumb)
 		assert graph is not None
 		if not is_phantom:
@@ -86,6 +86,8 @@ class BasicBlock(CodeNode):
 		# self._graph.add_node(self)
 
 		self.is_phantom = is_phantom
+		self.exit_sp = exit_sp
+		
 
 	# TODO: for now just add the jumpkind at the end of the block construction
 	def add_statement(self, statement, addr = None, tyenv = None, jumpkind = None):

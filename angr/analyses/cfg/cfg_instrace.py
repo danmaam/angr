@@ -4,6 +4,7 @@ from inspect import trace
 from multiprocessing.sharedctypes import Value
 from sqlite3 import Timestamp
 from sre_parse import State
+from tracemalloc import start
 from typing import Dict, List, Optional
 import collections
 from copy import copy
@@ -49,7 +50,8 @@ class CFGJob():
     def __init__(self, addr: int, node: CFGNode, destination: int, block_irsb : pyvex.IRSB,
                  last_addr: Optional[int] = None,
                  src_node: Optional[CFGNode] = None, src_ins_addr: Optional[int] = None,
-                 src_stmt_idx: Optional[int] = None, returning_source=None, syscall: bool = False, thread = '0'):
+                 src_stmt_idx: Optional[int] = None, returning_source=None, syscall: bool = False, thread = '0',
+                 start_sp: int = None, exit_sp = None):
         self.addr = addr
         self.node = node
         self.destination = destination
@@ -61,6 +63,9 @@ class CFGJob():
         self.syscall = syscall
         self.block_irsb = block_irsb
         self.thread = thread
+
+        self.start_sp = start_sp
+        self.exit_sp = exit_sp
 
         
 
@@ -126,6 +131,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         print(self.avoided_addresses)
 
         self.lift_cache = {}
+        self.pruned_jumps = set()        
 
         self._analyze()
 
@@ -137,7 +143,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
     def next_irsb_block(self, tid, ts):
         
-        block_head = None
+        (block_head, start_sp, exit_sp) = (None, None, None)
 
         th_trace = self._ins_trace['thread_exec_trace'][tid]
     
@@ -151,6 +157,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 print("porcodio ho finito")
                 return (-1,-1,-1)
 
+            start_sp = current_instruction['stack_pointer'] if block_head is None else start_sp
             block_head = current_instruction['address'] if block_head is None else block_head
             
             instructions.append(self.project.loader._instruction_map[current_instruction['address']][ts])
@@ -177,11 +184,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
                 next_ip = current_instruction['destination']
+                exit_sp = current_instruction['stack_pointer']
                 lifted[block_head] = bytecode                
                 break
             
 
-        return block_head, irsb, next_ip
+        return (block_head, irsb, next_ip, start_sp, exit_sp)
 
 
     def disasm(self, bytecode, block_head):
@@ -201,7 +209,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         # TODO: process in parallel each thread
         # First try with trace at timestamp 0 and thread 0
-        (block_head, irsb, next_ip) = self.next_irsb_block('0', 0)
+        (block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block('0', 0)
 
 
         # Create the current function in the Function Manager
@@ -214,7 +222,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
         new_job = CFGJob(
-            block_head, None, next_ip, block_irsb=irsb)
+            block_head, None, next_ip, block_irsb=irsb, start_sp=start_sp, exit_sp=exit_sp)
         self._insert_job(new_job)
 
 
@@ -235,6 +243,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         assert len(self.model.get_all_nodes(addr = group.addr, anyaddr = True)) <= 1
 
         node : BasicBlock = self.model.get_any_node(addr = group.addr, anyaddr = True)
+
+        # it means we are in the entry point of the function
+        if working is None:
+            self._current.function.sp_delta = job.start_sp
 
         if node is not None:
             # compare the found node with the current group
@@ -275,14 +287,15 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         self._current.working = working
 
+        # set the stack pointer of exit from the basic block
+        node.exit_sp = job.exit_sp
+
         assert self._current.working is not None
         return     
 
 
 
     def split_node(self, node, target) -> BasicBlock :       
-
-
 
         bytecode = lifted[node.addr]
         offset = target - node._irsb.addr
@@ -318,63 +331,84 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         working : BasicBlock = self._current.working
         jumpkind = working._irsb.jumpkind
+        rip = working._irsb.instruction_addresses[-1]
 
-        # if target == 0x7FF7CE25DCC4:
-        #     breakpoint()
+        # get all the possible jump targets from the current block
+        jump_targets = working._irsb.constant_jump_targets.copy()
+        jump_targets.add(target)
+
 
         if jumpkind == 'Ijk_Boring':
-            # get all the possible jump targets from the current block
-            jump_targets = working._irsb.constant_jump_targets.copy()
-            jump_targets.add(target)
+            # herustic checks for call similarity
 
+            # 1. pruned jump check
+            if rip not in self.pruned_jumps:
+            
+                # 2. exclusion checks
+                if  self._current.function.sp_delta != self._current.working.exit_sp or \
+                    self._current.function.addr <= target and target <= rip or \
+                    rip <= target and target <= self._callstack.ret_addr:
 
-            # check if we are in a jump stub for an external function call
+                    self.pruned_jumps.add(rip)
 
-            if len(jump_targets) == 1 and not self.should_target_be_tracked(target):
+                else:            
+                    # 3. inclusion checks
+                    func_map = self.functions._function_map
 
-                # breakpoint()
-                
-                # TODO: check if it's necessarty to add a new edge 
-                self._current.function.add_jumpout_site(self._current.working)
+                    # TODO: remember to remove the True in the if
+                    if  self.functions.function(addr=target) or \
+                        target <= self._current.function.addr or \
+                        any(rip <= func.addr and func.addr <= target for func in func_map.keys()):
+                        
+                        # TODO: check if it's necessarty to add a new edge 
+                        self._current.function.add_jumpout_site(self._current.working)
 
+                        # check if is a call to an external library function:
+                        # since library function are not tracked, we need to fix the callstack
+                        if len(jump_targets) == 1 and not self.should_target_be_tracked(target):   
 
-                # get stub function from call stack and pop the callstack
-                (caller, working_bb, ret_addr) = (self._callstack.current.function, self._callstack.current.working, self._callstack.ret_addr)
+                            # get stub function from call stack and pop the callstack
+                            (caller, working_bb, ret_addr) = (self._callstack.current.function, self._callstack.current.working, self._callstack.ret_addr)
+                            self._callstack = self._callstack.pop()
 
-                self._callstack = self._callstack.pop()
-                # add a fake return from the stub to the caller of the stub
-                self._current.function._fakeret_to(self._current.working, caller)
+                            # add a fake return from the stub to the caller of the stub
+                            self._current.function._fakeret_to(self._current.working, caller)
 
-                self._current = self.State(function=caller, working=working_bb)
+                            # set the new state
+                            self._current = self.State(function=caller, working=working_bb)
 
-
-                l.debug(f"Rax dispatcher, popping {hex(ret_addr)}")
-                l.debug(f"Function: {hex(self._current.function.addr)}, {hex(self._current.working.addr)}")
-                return
-
-
-            for t in jump_targets:
-                if t != target:
-                    assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
-                    node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
-
-                    if node is not None:
-                        assert isinstance(node, BasicBlock)
-                        if not node.is_phantom and node.addr != t:
-                            node = self.split_node(node, t)
+                            l.debug(f"Rax dispatcher, popping {hex(ret_addr)}")
+                            l.debug(f"Function: {hex(self._current.function.addr)}, {hex(self._current.working.addr)}")
+                            return
+                        
+                        # it's a call to an internal function, so it's sufficient to fix the current function
+                        else:
+                            self._current = self.State(function=self.functions.function(target, create = True))
+                            return
+                    
                     else:
-                        node = BasicBlock(addr = t, graph=self._current.function.transition_graph, is_phantom = True)
+                        self.pruned_jumps.add(rip)
 
-                        self.model.add_node(t, node)
-                    self._current.function._transit_to(working, node)                       
+                for t in jump_targets:
+                    if t != target:
+                        assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
+                        node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
+
+                        if node is not None:
+                            assert isinstance(node, BasicBlock)
+                            if not node.is_phantom and node.addr != t:
+                                node = self.split_node(node, t)
+                        else:
+                            node = BasicBlock(addr = t, graph=self._current.function.transition_graph, is_phantom = True)
+
+                            self.model.add_node(t, node)
+                        self._current.function._transit_to(working, node)                       
 
 
         
         elif jumpkind == 'Ijk_Call':
             # Check if it's a call to a library function
             return_address = working.addr + working.size
-            callsite_address = working._irsb.instruction_addresses[-1]
-
 
             if self.should_target_be_tracked(target):
 
@@ -395,29 +429,27 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 self._current.function._transit_to(working, return_node)
                 
                 self.functions._add_call_to(self._current.function.addr, working, target, \
-                    return_node, ins_addr = callsite_address
+                    return_node, ins_addr = rip
                     )    
 
-                l.debug(hex(callsite_address) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
+                l.debug(hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
                 if self._callstack is None:
-                    self._callstack = CallStack(callsite_address, target, ret_addr=return_address, current=self._current)
+                    self._callstack = CallStack(rip, target, ret_addr=return_address, current=self._current)
 
                 else:
-                    self._callstack = self._callstack.call(callsite_address, target, retn_target=return_address,
+                    self._callstack = self._callstack.call(rip, target, retn_target=return_address,
                                 current=self._current)
 
                 
                 
-                self._current = self.State(function=called, working=self.model.get_node(target))
+                self._current = self.State(function=called, working=None)
                 assert self._current.function.addr == target
 
                 # TODO: handle calls in the middle of a block
-                # TODO: check if everything works without this assignment
-                # self._current.working = self.model.get_node(target) 
 
             else:
-                l.debug("Ignoring call @" + hex(callsite_address) + " since it's to a library function")
+                l.debug("Ignoring call @" + hex(rip) + " since it's to a library function")
         
         elif jumpkind == 'Ijk_Ret' and self._callstack is not None:
             # TODO: find out if the edges to be addedd are necessary 
@@ -426,10 +458,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             l.debug("Returning to " + hex(target))
 
             try:
-                # while returned.ret_addr != target:
-                #     c = returned.current
-                #     c.function._fake
-
 
                 (func, working_bb) = (self._callstack.current.function, self._callstack.current.working)
 
@@ -447,14 +475,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 pass
             except SimEmptyCallStackError:
                 l.warning("Stack empty")
-
                 
-
-
-        
-
-
-
 
     # TODO: handle multiple timestamps for self modifying code 
     # From the execution trace, detects and create the next IR group to be processed
@@ -462,8 +483,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         target = job.destination
 
+
         #TODO: don't return -1 just to end the process
-        (head, irsb, next_ip) = self.next_irsb_block(job.thread, 0)
+        (head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(job.thread, 0)
         if self.should_abort:
             return []
 
@@ -473,7 +495,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
         self.process_type(target, job)        
-        new_job = CFGJob(head, None, next_ip, irsb, thread = job.thread)
+        new_job = CFGJob(head, None, next_ip, irsb, thread = job.thread, start_sp=start_sp, exit_sp=exit_sp)
 
         return [new_job]
         
