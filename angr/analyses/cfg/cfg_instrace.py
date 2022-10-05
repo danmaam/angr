@@ -10,11 +10,12 @@ from typing import Dict, List, Optional
 import collections
 from copy import copy
 import sys
+from matplotlib.pyplot import pause
 
 # LAST BASE: 0x7ff6153c0000
 
 
-from sympy import false, true
+from sympy import Q, false, true
 import angr
 
 from angr.engines.pcode.lifter import IRSB
@@ -40,7 +41,7 @@ import IPython
 
 l = logging.getLogger(name=__name__)
 if sys.argv[1]:
-    l.setLevel(logging.getLevelName(sys.argv[1]))
+	l.setLevel(logging.getLevelName(sys.argv[1]))
 
 
 # TODO: TI PREGO TROVA UN MODO MIGLIORE DI FARE IL BLOCK SPLIT FA SCHIFO
@@ -48,507 +49,520 @@ lifted = {}
 
 splitted = set()
 class CFGJob():
-    def __init__(self, addr: int, destination: int, block_irsb : pyvex.IRSB, tid : int,
-                 last_addr: Optional[int] = None,
-                 src_node: Optional[CFGNode] = None, src_ins_addr: Optional[int] = None,
-                 src_stmt_idx: Optional[int] = None, returning_source=None, syscall: bool = False, thread = '0',
-                 start_sp: int = None, exit_sp = None):
-        self.addr = addr
-        self.destination = destination
-        self.last_addr = last_addr
-        self.src_node = src_node
-        self.src_ins_addr = src_ins_addr
-        self.src_stmt_idx = src_stmt_idx
-        self.returning_source = returning_source
-        self.syscall = syscall
-        self.block_irsb = block_irsb
-        self.thread = thread
+	def __init__(self, addr: int, destination: int, block_irsb : pyvex.IRSB, tid : int,
+				 last_addr: Optional[int] = None,
+				 src_node: Optional[CFGNode] = None, src_ins_addr: Optional[int] = None,
+				 src_stmt_idx: Optional[int] = None, returning_source=None, syscall: bool = False, thread = '0',
+				 start_sp: int = None, exit_sp = None):
+		self.addr = addr
+		self.destination = destination
+		self.last_addr = last_addr
+		self.src_node = src_node
+		self.src_ins_addr = src_ins_addr
+		self.src_stmt_idx = src_stmt_idx
+		self.returning_source = returning_source
+		self.syscall = syscall
+		self.block_irsb = block_irsb
+		self.thread = thread
 
-        self.tid = tid
+		self.start_sp = start_sp
+		self.exit_sp = exit_sp
 
-        self.start_sp = start_sp
-        self.exit_sp = exit_sp
-
-        
+		self.tid = tid
+		
 
 class CFGInstrace(ForwardAnalysis, CFGBase):
-    """
-    The CFG is recovered from a list of executed instructions, and a trace
-    of execution, one per thread
-    """
-    tag = 'CFGInstrace'
-
-    class State:
-        def __init__(self, function = None, working = None):
-            self.function = function
-            self.working = working
-
-        def set_function(self, fun):
-            self.function = fun
-        
-        def set_working(self, working):
-            self.working = working
-
-        def pp(self):
-            print(hex(self.working.addr))
-
-    # Load the set of instructions that shouldn't be tracked
-    def load_libraries(self, x):
-        with open(x, "rb") as f:
-            content = f.read()
-            chunks = [content[t:t + 16] for t in range(0, len(content), 16)]
-            for c in chunks:
-                addr = struct.unpack('<q', c[:8])[0]
-                size = struct.unpack('<q', c[8:])[0]
-                self.avoided_addresses[addr] = addr + size
-
-
-    def __init__(self, trace, to_avoid_functions, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None):
-        ForwardAnalysis.__init__(self, allow_merging=False)
-        CFGBase.__init__(
-            self,
-            'instrace',
-            0,
-            normalize=normalize,
-            force_segment=False,
-            base_state=base_state,
-            resolve_indirect_jumps=False,
-            indirect_jump_resolvers=None,
-            indirect_jump_target_limit=100000,
-            detect_tail_calls=detect_tail_calls,
-            skip_unmapped_addrs=True,
-            low_priority=low_priority,
-            model=model,
-        )
-
-        self._callstack = defaultdict(lambda: None)
-        self._current = defaultdict(lambda: self.State(function = None, working = None))
-        self._parsed_bytecode_per_thread = defaultdict(lambda: b'')
-
-
-        self._ins_trace = open(trace, "rb")
-        
-        
-        self.avoided_addresses = {}
-
-        self.load_libraries(to_avoid_functions)
-        print(self.avoided_addresses)
-
-        self.lift_cache = {}
-        self.pruned_jumps = set()        
-
-
-        self._analyze()
-
-        # shitty hacks just to test the code working
-        self._low_img = 0x5616e85e4000
-        self._high_img = 0x55b5326c9ab8        
-
-
-    def next_irsb_block(self, ts):
-        
-        (block_head, start_sp, exit_sp) = (None, None, None)
-    
-        instructions = []
-
-
-        while True:
-            curr_chunk = self._ins_trace.read(21)
-
-            if curr_chunk:
-                ip = struct.unpack('<Q', curr_chunk[:8])[0]
-                sp = struct.unpack('<Q', curr_chunk[8:16])[0]
-                tid =  struct.unpack('<I', curr_chunk[16:20])[0]
-                is_dst = struct.unpack('<B', curr_chunk[20:21])[0]                    
-
-                start_sp = sp if block_head is None else start_sp
-                block_head = ip if block_head is None else block_head
-                
-                self._parsed_bytecode_per_thread[tid] += self.project.loader._instruction_map[ip][ts]
-
-                if is_dst:
-                    dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
-                    # end of the basic block, lift it to IRSB
-                    bytecode = self._parsed_bytecode_per_thread[tid] 
-                    
-                    # check if the block is in lift cache
-                    if block_head in self.lift_cache.keys():
-                        irsb = self.lift_cache[block_head]
-                    
-                    else:
-                        
-                        irsb = pyvex.lift(bytecode, block_head,
-                                        archinfo.ArchAMD64())
+	"""
+	The CFG is recovered from a list of executed instructions, and a trace
+	of execution, one per thread
+	"""
+	tag = 'CFGInstrace'
+
+	class State:
+		def __init__(self, function = None, working = None, sp = None, entry_rsp = None):
+			self.function = function
+			self.working = working
+			self.sp = sp
+			self.rsp_at_entrypoint = entry_rsp
+
+
+		def pp(self):
+			print(hex(self.working.addr))
+
+	# Load the set of instructions that shouldn't be tracked
+	def load_libraries(self, x):
+		with open(x, "rb") as f:
+			content = f.read()
+			chunks = [content[t:t + 16] for t in range(0, len(content), 16)]
+			for c in chunks:
+				addr = struct.unpack('<q', c[:8])[0]
+				size = struct.unpack('<q', c[8:])[0]
+				self.avoided_addresses[addr] = addr + size
+
+
+	def __init__(self, trace, to_avoid_functions, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None):
+		ForwardAnalysis.__init__(self, allow_merging=False)
+		CFGBase.__init__(
+			self,
+			'instrace',
+			0,
+			normalize=normalize,
+			force_segment=False,
+			base_state=base_state,
+			resolve_indirect_jumps=False,
+			indirect_jump_resolvers=None,
+			indirect_jump_target_limit=100000,
+			detect_tail_calls=detect_tail_calls,
+			skip_unmapped_addrs=True,
+			low_priority=low_priority,
+			model=model,
+		)
+
+		self._callstack = defaultdict(lambda: None)
+		self._current = defaultdict(lambda: self.State(function = None, working = None, sp = None))
+		self._block_head_per_thread = defaultdict(lambda: None)
+		self._parsed_bytecode_per_thread = defaultdict(lambda: b'')
+
+
+		self._ins_trace = open(trace, "rb")
+		
+		
+		self.avoided_addresses = {}
+
+		self.load_libraries(to_avoid_functions)
+		print(self.avoided_addresses)
+
+		self.lift_cache = {}
+		self.pruned_jumps = set()        
+
+
+		self._analyze()
+
+		# shitty hacks just to test the code working
+		self._low_img = 0x5616e85e4000
+		self._high_img = 0x55b5326c9ab8        
+
+
+	def next_irsb_block(self, ts):
+		
+	
+
+		while True:
+			curr_chunk = self._ins_trace.read(21)
+
+			if curr_chunk:
+				ip = struct.unpack('<Q', curr_chunk[:8])[0]
+				sp = struct.unpack('<Q', curr_chunk[8:16])[0]
+				tid =  struct.unpack('<I', curr_chunk[16:20])[0]
+				is_dst = struct.unpack('<B', curr_chunk[20:21])[0]                    
+
+				start_sp = sp if self._block_head_per_thread[tid] is None else start_sp
+				self._block_head_per_thread[tid] = ip if self._block_head_per_thread[tid] is None else self._block_head_per_thread[tid]
+				
+
+				
+				self._parsed_bytecode_per_thread[tid] += self.project.loader._instruction_map[ip][ts]
+
+				if is_dst:
+					dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
+					# end of the basic block, lift it to IRSB
+					bytecode = self._parsed_bytecode_per_thread[tid] 
+					
+					# check if the block is in lift cache
+					if self._block_head_per_thread[tid] in self.lift_cache.keys():
+						irsb = self.lift_cache[self._block_head_per_thread[tid]]
+					
+					else:
+						
+						irsb = pyvex.lift(bytecode, self._block_head_per_thread[tid],
+										archinfo.ArchAMD64())
 
-                        while (irsb.size != len(bytecode)):
-                            # TODO: find a solution to pyvex not lifting each part of bytecode
-                            temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
-                            irsb.extend(temp)
+						while (irsb.size != len(bytecode)):
+							# TODO: find a solution to pyvex not lifting each part of bytecode
+							temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
+							irsb.extend(temp)
 
-                        self.lift_cache[block_head] = irsb
+						self.lift_cache[self._block_head_per_thread[tid]] = irsb
 
-                        if len(irsb.constant_jump_targets) > 2:
-                            print('porcodiddio')
-                            IPython.embed()
-                        assert len(irsb.constant_jump_targets) <= 2
-                        # clear the parsed bytecode
+						# clear the parsed bytecode
 
-                    self._parsed_bytecode_per_thread[tid] = b''
-                    next_ip = dst
-                    exit_sp = sp
-                    # TODO: allow relifting without saving twice the bytecode
-                    lifted[block_head] = bytecode 
-                    if sys.argv[2] and sys.argv[2] == '--disasm':
-                        self.disasm(bytecode, block_head)               
-                    break
+					self._parsed_bytecode_per_thread[tid] = b''
+					next_ip = dst
+					exit_sp = sp
+					# TODO: allow relifting without saving twice the bytecode
+					lifted[self._block_head_per_thread[tid]] = bytecode 
+					if sys.argv[2] and sys.argv[2] == '--disasm' and tid == 2:
+						self.disasm(bytecode, self._block_head_per_thread[tid])
+					if tid == 2 and ip == 0x7ff701401b30:
+						print("POROCDDIO BENEDETTO")
+						IPython.embed()               
+					break
 
-            else:
-                return (-1,-1,-1,-1,-1, -1)
+			else:
+				return (-1,-1,-1,-1,-1, -1)
 
-        return (tid, block_head, irsb, next_ip, start_sp, exit_sp)
+		return (tid, self._block_head_per_thread[tid], irsb, next_ip, start_sp, exit_sp)
 
-        
+		
 
 
-    def disasm(self, bytecode, block_head):
-        #FOR DEBUGGING PURPOSES
-        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
-        for i in md.disasm(bytecode, block_head):
-            sys.stderr.write("0x%x:\t%s\t%s\n" % (i.address, i.mnemonic, i.op_str))
+	def disasm(self, bytecode, block_head):
+		#FOR DEBUGGING PURPOSES
+		md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+		for i in md.disasm(bytecode, block_head):
+			sys.stderr.write("0x%x:\t%s\t%s\n" % (i.address, i.mnemonic, i.op_str))
+		sys.stderr.write("\n")
 
-    def init_thread(self, tid, block_head):
-        # Create the current function in the Function Manager
-        l.info(f"TID {tid}: Initializing thread")
-        initial = self.functions.function(addr=block_head, create=True)
+	def init_thread(self, tid, block_head):
+		# Create the current function in the Function Manager
+		l.info(f"TID {tid}: Initializing thread")
+		initial = self.functions.function(addr=block_head, create=True)
 
-        # create the self._current[tid] pair
-        self._current[tid] = self.State(function = initial)
+		# create the self._current[tid] pair
+		self._current[tid] = self.State(function = initial, working = None)
 
 
-    def _pre_analysis(self):
-        # build basic blocks from the instruction trace
-        # need to emulate the trace for each thread
-        # TODO: handle self modifying code
+	def _pre_analysis(self):
+		# build basic blocks from the instruction trace
+		# need to emulate the trace for each thread
+		# TODO: handle self modifying code
 
-        self._initialize_cfg()
+		self._initialize_cfg()
 
-        # TODO: process in parallel each thread
-        # First try with trace at timestamp 0 and thread 0
-        (tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(0)
+		# TODO: process in parallel each thread
+		# First try with trace at timestamp 0 and thread 0
+		(tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(0)
 
-        new_job = CFGJob(
-           block_head, next_ip, block_irsb=irsb, tid=tid, start_sp=start_sp, exit_sp=exit_sp)
-        self._insert_job(new_job)
+		new_job = CFGJob(
+		   block_head, next_ip, block_irsb=irsb, tid=tid, start_sp=start_sp, exit_sp=exit_sp)
+		self._insert_job(new_job)
 
 
 
-    def _job_key(self, job):
-        return job.addr
+	def _job_key(self, job):
+		return job.addr
 
-    def _job_queue_empty(self) -> None:
-        l.debug("Job queue is empty. Stopping.")
+	def _job_queue_empty(self) -> None:
+		l.debug("Job queue is empty. Stopping.")
 
-    def _pre_job_handling(self, job: CFGJob) -> None:
-        target = job.destination
-        tid = job.tid
+	def _pre_job_handling(self, job: CFGJob) -> None:
+		target = job.destination
+		tid = job.tid
 
-        # Before going on with the job, we need to initialize the thread context
-        # or to process the type of the previous working block 
-        if self._current[tid].function is None:
-            self.init_thread(tid, block_head=target)
+		# Before going on with the job, we need to initialize the thread context
+		# or to process the type of the previous working block 
+		if self._current[tid].function is None:
+			self.init_thread(tid, block_head=target)
 
-        else:
-            self.process_type(self._current[tid].working.prev_jump_target, job)        
+		else:
+			self.process_type(self._current[tid].working.prev_jump_target, job)        
 
 
-    # TODO: check if splitting works with call in the same function
-    def process_group(self, job: CFGJob) -> None:
-        l.debug(f"TID {job.tid} processing group {hex(job.addr)}")
-        tid = job.tid
-        group : pyvex.IRSB = job.block_irsb
-        working : BasicBlock = self._current[tid].working
+	# TODO: check if splitting works with call in the same function
+	def process_group(self, job: CFGJob) -> None:
+		l.debug(f"TID {job.tid} processing group {hex(job.addr)}")
+		tid = job.tid
+		group : pyvex.IRSB = job.block_irsb
+		working : BasicBlock = self._current[tid].working
 
+		if working is None:
+			self._current[tid].rsp_at_entrypoint = job.start_sp
 
-        # search for a node at the same address in the model
-        assert len(self.model.get_all_nodes(addr = group.addr, anyaddr = True)) <= 1
+		# search for a node at the same address in the model
+		assert len(self.model.get_all_nodes(addr = group.addr, anyaddr = True)) <= 1
 
-        node : BasicBlock = self.model.get_any_node(addr = group.addr, anyaddr = True)
+		node : BasicBlock = self.model.get_any_node(addr = group.addr, anyaddr = True)
 
-        # it means we are in the entry point of the function
-        if working is None:
-            self._current[tid].function.sp_delta = job.start_sp
+		if node is not None:
+			# compare the found node with the current group
+			if node.addr == group.addr:
+				# the node is a phantom one and must be converted to a non phantom
+				if node.is_phantom:
+					node.phantom_to_node(group)
+					working = node
+				else:
+					# TODO: handle self modifying code at the same address location
+					while node._irsb.jumpkind == 'Ijk_Splitted':
 
-        if node is not None:
-            # compare the found node with the current group
-            if node.addr == group.addr:
-                # the node is a phantom one and must be converted to a non phantom
-                if node.is_phantom:
-                    node.phantom_to_node(group)
-                    working = node
-                else:
-                    # TODO: handle self modifying code at the same address location
-                    while node._irsb.jumpkind == 'Ijk_Splitted':
+						successors = node.successors()
+						assert len(successors) == 1
 
-                        successors = node.successors()
-                        assert len(successors) == 1
+						node = successors[0]                        
 
-                        node = successors[0]                        
+					working = node
 
-                    working = node
+			# TODO: differentiate between jump in middle of funciton or jump not to the first instruction \
+			# of a block
 
-            # TODO: differentiate between jump in middle of funciton or jump not to the first instruction \
-            # of a block
+			else:
+				if group.addr == 0x07FF70140EC1A:
+					IPython.embed()
+				working = self.split_node(node, group.addr, tid)
 
-            else:
-                working = self.split_node(node, group.addr, tid)
+		else:
+			# there isn't any node with the address of the current group
+			# just create a new node
+			#l.debug(f"Creating new Basic Block for target {hex(group.addr)}")
+			node = BasicBlock(group.addr, group.size, self._current[tid].function.transition_graph, irsb=group)
 
-        else:
-            # there isn't any node with the address of the current group
-            # just create a new node
-            #l.debug(f"Creating new Basic Block for target {hex(group.addr)}")
-            node = BasicBlock(group.addr, group.size, self._current[tid].function.transition_graph, irsb=group)
 
+			self.model.add_node(node.addr, node)
+			# check for the beginning of the program
+			if working is not None:
+				self._current[tid].function._transit_to(working, node)
+			working = node
 
-            self.model.add_node(node.addr, node)
-            # check for the beginning of the program
-            if working is not None:
-                self._current[tid].function._transit_to(working, node)
-            working = node
+		self._current[tid].working = working
+		self._current[tid].working.prev_jump_target = job.destination
 
-        self._current[tid].working = working
-        self._current[tid].working.prev_jump_target = job.destination
+		# set the stack pointer of exit from the basic block
+		self._current[tid].sp = job.exit_sp
 
-        # set the stack pointer of exit from the basic block
-        node.exit_sp = job.exit_sp
+		assert self._current[tid].working is not None
+		return     
 
-        assert self._current[tid].working is not None
-        return     
 
 
+	def split_node(self, node, target, tid) -> BasicBlock :       
+		l.info(f"TID {tid}: Splitting node at " + hex(target))
+		bytecode = lifted[node.addr]
+		offset = target - node._irsb.addr
 
-    def split_node(self, node, target, tid) -> BasicBlock :       
-        
+		car_bytecode = bytecode[:offset]
+		cdr_bytecode = bytecode[offset:]
 
+		# split the node
+		(a, b) =  self._current[tid].function._split_node(node, target, car_bytecode, cdr_bytecode)
 
-        bytecode = lifted[node.addr]
-        offset = target - node._irsb.addr
+		# update the lifted bytecode
+		lifted[node._irsb.addr] = car_bytecode
+		lifted[target] = cdr_bytecode
 
-        car_bytecode = bytecode[:offset]
-        cdr_bytecode = bytecode[offset:]
+		self.model.remove_node(node.addr, node)
+		self.model.add_node(a.addr, a)
+		self.model.add_node(b.addr, b)
 
-        # split the node
-        (a, b) =  self._current[tid].function._split_node(node, target, car_bytecode, cdr_bytecode)
+		splitted.add(a.addr)
+		splitted.add(b.addr)
 
-        # update the lifted bytecode
-        lifted[node._irsb.addr] = car_bytecode
-        lifted[target] = cdr_bytecode
+		return b
+	
+	def should_target_be_tracked(self, target):
+		for (x,y) in self.avoided_addresses.items():
+			if x <= target and target < y:
+				return False
+		return True
 
-        self.model.remove_node(node.addr, node)
-        self.model.add_node(a.addr, a)
-        self.model.add_node(b.addr, b)
+	def process_type(self, target, job):
+		
+		tid = job.tid
+		l.debug(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
+		
+		working : BasicBlock = self._current[tid].working
+		jumpkind = working._irsb.jumpkind
+		rip = working._irsb.instruction_addresses[-1]
 
-        splitted.add(a.addr)
-        splitted.add(b.addr)
+		# get all the possible jump targets from the current block
+		jump_targets = working._irsb.constant_jump_targets.copy()
+		jump_targets.add(target)
+		jump_targets = set(filter(lambda x: not (working.addr <= x and x < working.addr + working.size), jump_targets))
 
-        return b
-    
-    def should_target_be_tracked(self, target):
-        for (x,y) in self.avoided_addresses.items():
-            if x <= target and target < y:
-                return False
-        return True
 
-    def process_type(self, target, job):
-        
-        tid = job.tid
-        l.debug(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
 
+		assert len(jump_targets) <= 2
 
-        
-        working : BasicBlock = self._current[tid].working
-        jumpkind = working._irsb.jumpkind
-        rip = working._irsb.instruction_addresses[-1]
+		if jumpkind == 'Ijk_Boring':
+			# herustic checks for call similarity
 
-        # get all the possible jump targets from the current block
-        jump_targets = working._irsb.constant_jump_targets.copy()
-        jump_targets.add(target)
+			# 1. pruned jump check
+			if rip not in self.pruned_jumps:
+				
 
+				# check in before we are in a jmp stub 
+				# since library function are not tracked, we need to fix the callstack
+				if len(jump_targets) == 1 and not self.should_target_be_tracked(target): 
 
-        if jumpkind == 'Ijk_Boring':
-            # herustic checks for call similarity
 
-            # 1. pruned jump check
-            if rip not in self.pruned_jumps:
-            
-                # 2. exclusion checks
-                if  self._current[tid].function.sp_delta != self._current[tid].working.exit_sp or \
-                    self._current[tid].function.addr <= target and target <= rip or \
-                    rip <= target and target <= self._callstack[tid].ret_addr:
+					self._current[tid].function.add_jumpout_site(self._current[tid].working)
+					# get stub function from call stack and pop the callstack
+					(caller, working_bb, ret_addr, sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)
+					self._callstack[tid] = self._callstack[tid].pop()
 
-                    self.pruned_jumps.add(rip)
+					# add a fake return from the stub to the caller of the stub
+					self._current[tid].function._fakeret_to(self._current[tid].working, caller)
 
-                else:            
-                    # 3. inclusion checks
-                    func_map = self.functions._function_map
+					# set the new state
+					self._current[tid] = self.State(function=caller, working=working_bb, sp = sp, entry_rsp=entry_rsp)
 
-                    # TODO: remember to remove the True in the if
-                    if  self.functions.function(addr=target) or \
-                        target <= self._current[tid].function.addr or \
-                        any(rip <= func and func <= target for func in func_map.keys()):
-                        
-                        # TODO: check if it's necessarty to add a new edge 
-                        self._current[tid].function.add_jumpout_site(self._current[tid].working)
+					l.info(f"TID {tid}: Rax dispatcher, popping {hex(ret_addr)}")
+					l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
+					return
 
-                        # check if is a call to an external library function:
-                        # since library function are not tracked, we need to fix the callstack
-                        if len(jump_targets) == 1 and not self.should_target_be_tracked(target):   
 
-                            # get stub function from call stack and pop the callstack
-                            (caller, working_bb, ret_addr) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr)
-                            self._callstack[tid] = self._callstack[tid].pop()
+				# it's not a call to a library function; apply heuristics for call similarity
+				# 2. exclusion checks		
 
-                            # add a fake return from the stub to the caller of the stub
-                            self._current[tid].function._fakeret_to(self._current[tid].working, caller)
+				if  self._current[tid].rsp_at_entrypoint != self._current[tid].sp or \
+					self._current[tid].function.addr <= target and target <= rip or \
+					rip <= target and target <= self._callstack[tid].ret_addr:
 
-                            # set the new state
-                            self._current[tid] = self.State(function=caller, working=working_bb)
+					self.pruned_jumps.add(rip)
+					is_jump = True
 
-                            l.debug(f"Rax dispatcher, popping {hex(ret_addr)}")
-                            l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
-                            return
-                        
-                        # it's a call to an internal function, so it's sufficient to fix the current function
-                        else:
-                            self._current[tid] = self.State(function=self.functions.function(target, create = True))
-                            return
-                    
-                    else:
-                        self.pruned_jumps.add(rip)
+				else:            
+					# 3. inclusion checks
+					func_map = self.functions._function_map
 
-                for t in jump_targets:
-                    if t != target:
-                        assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
-                        node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
+					# TODO: remember to remove the True in the if
+					if  self.functions.function(addr=target) or \
+						target <= self._current[tid].function.addr or \
+						any(rip <= func and func <= target for func in func_map.keys()):
+						
+						l.info(f"TID {tid}: @{hex(rip)} Detected a call with call similarity heuristics with dst {hex(target)}")
+						# Heuristics show it's a call. Fix the current function with the effectively called
+						# without pushing anything on the callstack
+						# TODO: check if it's necessarty to add a new edge 
+						self._current[tid].function.add_jumpout_site(self._current[tid].working)      
+						
+						self._current[tid] = self.State(function=self.functions.function(target, create = True), working = None)
+						is_jump = False
+					
+					# Default policy: it's a jump
+					else:
+						self.pruned_jumps.add(rip)
+						is_jump = True
+			
+			else:
+				is_jump = True
 
-                        if node is not None:
-                            assert isinstance(node, BasicBlock)
-                            if not node.is_phantom and node.addr != t:
-                                IPython.embed()
-                                node = self.split_node(node, t, tid)
-                        else:
-                            node = BasicBlock(addr = t, graph=self._current[tid].function.transition_graph, is_phantom = True)
+			if is_jump:
+				for t in jump_targets:
+					if t != target:
+						assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
+						node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
 
-                            self.model.add_node(t, node)
-                        self._current[tid].function._transit_to(working, node)                       
+						if node is not None:
+							assert isinstance(node, BasicBlock)
+							if not node.is_phantom and node.addr != t:
+								node = self.split_node(node, t, tid)
+						else:
+							node = BasicBlock(addr = t, graph=self._current[tid].function.transition_graph, is_phantom = True)
 
+							self.model.add_node(t, node)
+						self._current[tid].function._transit_to(working, node)                       
 
-        
-        elif jumpkind == 'Ijk_Call':
-            # Check if it's a call to a library function
-            return_address = working.addr + working.size
 
-            if self.should_target_be_tracked(target):
+		
+		elif jumpkind == 'Ijk_Call': 
+			# Check if it's a call to a library function
 
-                # Register the call site in the current function            
-                called = self.functions.function(target, create = True)
+			return_address = working.addr + working.size
 
-                # Try to calculate the return from the call, so that it's possible to create the phantom node
-                
-                # Search for return node in model. If it doesn't exist, create a phantom one
-                assert len(self.model.get_all_nodes(addr = return_address, anyaddr = True)) <= 1
-                return_node = self.model.get_node(return_address)
+			if self.should_target_be_tracked(target):
 
-                if return_node is None:
-                    return_node = BasicBlock(return_address, graph = self._current[tid].function.transition_graph, is_phantom = True)
+				# Register the call site in the current function            
+				called = self.functions.function(target, create = True)
 
-                    self.model.add_node(return_address, return_node)
+				# Try to calculate the return from the call, so that it's possible to create the phantom node
+				
+				# Search for return node in model. If it doesn't exist, create a phantom one
+				assert len(self.model.get_all_nodes(addr = return_address, anyaddr = True)) <= 1
+				return_node = self.model.get_node(return_address)
 
-                self._current[tid].function._transit_to(working, return_node)
-                
-                self.functions._add_call_to(self._current[tid].function.addr, working, target, \
-                    return_node, ins_addr = rip
-                    )    
+				if return_node is None:
+					return_node = BasicBlock(return_address, graph = self._current[tid].function.transition_graph, is_phantom = True)
 
-                l.info(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
+					self.model.add_node(return_address, return_node)
 
-                if self._callstack[tid] is None:
-                    self._callstack[tid] = CallStack(rip, target, ret_addr=return_address, current=self._current[tid])
+				self._current[tid].function._transit_to(working, return_node)
+				
+				self.functions._add_call_to(self._current[tid].function.addr, working, target, \
+					return_node, ins_addr = rip
+					)    
 
-                else:
-                    self._callstack[tid] = self._callstack[tid].call(rip, target, retn_target=return_address,
-                                current=self._current[tid])
+				l.info(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
-                
-                
-                self._current[tid] = self.State(function=called, working=None)
-                assert self._current[tid].function.addr == target
+				if self._callstack[tid] is None:
+					self._callstack[tid] = CallStack(rip, target, ret_addr=return_address, current=self._current[tid])
 
-                # TODO: handle calls in the middle of a block
+				else:
+					self._callstack[tid] = self._callstack[tid].call(rip, target, retn_target=return_address,
+								current=self._current[tid])
 
-            else:
-                l.debug("Ignoring call @" + hex(rip) + " since it's to a library function")
-        
-        elif jumpkind == 'Ijk_Ret' and self._callstack[tid] is not None:
-            # TODO: find out if the edges to be addedd are necessary 
-            self._current[tid].function._add_return_site(self._current[tid].working)
+				
+				
+				self._current[tid] = self.State(function=called, working=None)
+				assert self._current[tid].function.addr == target
 
-            l.info(f"TID {tid}: Returning to " + hex(target))
+				# TODO: handle calls in the middle of a block
 
-            try:
-                if not self.should_target_be_tracked(target):
-                    l.warning("Ignoring return since it's to a library function")
-                    return
+			else:
+				l.debug("Ignoring call @" + hex(rip) + " since it's to a library function")
+		
+		elif jumpkind == 'Ijk_Ret' and self._callstack[tid] is not None:
+			# TODO: find out if the edges to be addedd are necessary 
+			self._current[tid].function._add_return_site(self._current[tid].working)
 
-                (func, working_bb) = (self._callstack[tid].current.function, self._callstack[tid].current.working)
+			l.info(f"TID {tid}: Returning to " + hex(target))
 
-                assert self._callstack[tid].ret_addr == target
-                
-                self._callstack[tid] = self._callstack[tid].ret(target)
-                self._current[tid] = self.State(function=func, working=working_bb)
+			try:
+				if not self.should_target_be_tracked(target):
+					l.warning("Ignoring return since it's to a library function")
+					return
 
-                # for debug purposes
-                # TODO: delete these lines
-                node = self.model.get_node(target)
-                assert node in self._current[tid].function.nodes
-                
-                
-                pass
-            except SimEmptyCallStackError:
-                l.warning("Stack empty")
+				(func, working_bb, stack_ptr, rsp_entry) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)
 
+				assert self._callstack[tid].ret_addr == target
 
-    # TODO: handle multiple timestamps for self modifying code 
-    # From the execution trace, detects and create the next IR group to be processed
-    def _get_successors(self, job: CFGJob) -> List[CFGJob]:
+				# TODO: don't remember why there is this check, reintroduce it when i remember why it's there
+				# assert self._callstack[tid].stack_ptr == self._current[tid].sp, hex(self._callstack[tid].stack_ptr) + " " + hex(self._current[tid].sp)
+				
+				self._callstack[tid] = self._callstack[tid].ret(target)
+				self._current[tid] = self.State(function=func, working=working_bb, sp=stack_ptr, entry_rsp=rsp_entry)
 
-        self.process_group(job)
+				# for debug purposes
+				# TODO: delete these lines
+				node = self.model.get_node(target)
+				assert node in self._current[tid].function.nodes
+				
+				
+				pass
+			except SimEmptyCallStackError:
+				l.warning("Stack empty")
 
-        (tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(0)
 
-        if self.should_abort:
-            return []
+	# TODO: handle multiple timestamps for self modifying code 
+	# From the execution trace, detects and create the next IR group to be processed
+	def _get_successors(self, job: CFGJob) -> List[CFGJob]:
 
+		self.process_group(job)
 
-        new_job = CFGJob(block_head, next_ip, irsb, thread = job.thread, tid=tid, start_sp=start_sp, exit_sp=exit_sp)
+		(tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(0)
 
-        return [new_job]
-        
+		if self.should_abort:
+			return []
 
-    # it isn't necessary to implement a post job handler
-    def _post_job_handling(self, job, new_jobs, successors):
-        pass
 
+		new_job = CFGJob(block_head, next_ip, irsb, thread = job.thread, tid=tid, start_sp=start_sp, exit_sp=exit_sp)
 
-    def _handle_successor(self, job: CFGJobBase, successor, successors):
-        # per each successor generated, add it to the list of jobs
-        return successors
+		return [new_job]
+		
 
-    def _intra_analysis(self):
-        return
+	# it isn't necessary to implement a post job handler
+	def _post_job_handling(self, job, new_jobs, successors):
+		pass
 
-    def _post_analysis(self) -> None:
-        IPython.embed()
-        print("End of analysis!")
+
+	def _handle_successor(self, job: CFGJobBase, successor, successors):
+		# per each successor generated, add it to the list of jobs
+		return successors
+
+	def _intra_analysis(self):
+		return
+
+	def _post_analysis(self) -> None:
+		IPython.embed()
+		print("End of analysis!")
 
 
 AnalysesHub.register_default('CFGInstrace', CFGInstrace)

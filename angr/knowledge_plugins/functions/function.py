@@ -874,7 +874,6 @@ class Function(Serializable):
         #TODO: insert assert of node in transition_graph
         # assert the address of splitting is in range of the irsb
 
-        l.info("Splitting node at " + hex(split_addr))
         assert node._irsb.addr < split_addr and split_addr <= node._irsb.addr + node._irsb.size
 
         # create the twos new IRSBs
@@ -887,7 +886,7 @@ class Function(Serializable):
 
         # create the new basic blocks
         car_bb = BasicBlock(car_irsb.addr, car_irsb.size, self.transition_graph, irsb=car_irsb)
-        cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self.transition_graph, irsb=cdr_irsb, exit_sp=node.exit_sp)
+        cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self.transition_graph, irsb=cdr_irsb)
 
         try:
             for s in node.successors():

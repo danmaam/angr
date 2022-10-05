@@ -86,8 +86,6 @@ class BasicBlock(CodeNode):
 		# self._graph.add_node(self)
 
 		self.is_phantom = is_phantom
-		self.exit_sp = exit_sp
-		self.prev_jump_target = None
 		
 
 	# TODO: for now just add the jumpkind at the end of the block construction
