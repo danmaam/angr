@@ -123,6 +123,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         self._callstack = defaultdict(lambda: None)
         self._current = defaultdict(lambda: self.State(function = None, working = None))
+        self._parsed_bytecode_per_thread = defaultdict(lambda: b'')
 
 
         self._ins_trace = open(trace, "rb")
@@ -135,6 +136,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
         self.lift_cache = {}
         self.pruned_jumps = set()        
+
 
         self._analyze()
 
@@ -149,6 +151,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     
         instructions = []
 
+
         while True:
             curr_chunk = self._ins_trace.read(21)
 
@@ -161,19 +164,19 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                 start_sp = sp if block_head is None else start_sp
                 block_head = ip if block_head is None else block_head
                 
-                instructions.append(self.project.loader._instruction_map[ip][ts])
+                self._parsed_bytecode_per_thread[tid] += self.project.loader._instruction_map[ip][ts]
 
                 if is_dst:
                     dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
                     # end of the basic block, lift it to IRSB
-
-                    bytecode = b''.join(instructions)
+                    bytecode = self._parsed_bytecode_per_thread[tid] 
                     
                     # check if the block is in lift cache
                     if block_head in self.lift_cache.keys():
                         irsb = self.lift_cache[block_head]
                     
-                    else: 
+                    else:
+                        
                         irsb = pyvex.lift(bytecode, block_head,
                                         archinfo.ArchAMD64())
 
@@ -184,11 +187,19 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
                         self.lift_cache[block_head] = irsb
 
+                        if len(irsb.constant_jump_targets) > 2:
+                            print('porcodiddio')
+                            IPython.embed()
+                        assert len(irsb.constant_jump_targets) <= 2
+                        # clear the parsed bytecode
+
+                    self._parsed_bytecode_per_thread[tid] = b''
                     next_ip = dst
                     exit_sp = sp
                     # TODO: allow relifting without saving twice the bytecode
                     lifted[block_head] = bytecode 
-                    self.disasm(bytecode, block_head)               
+                    if sys.argv[2] and sys.argv[2] == '--disasm':
+                        self.disasm(bytecode, block_head)               
                     break
 
             else:
@@ -204,10 +215,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
         md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
         for i in md.disasm(bytecode, block_head):
             sys.stderr.write("0x%x:\t%s\t%s\n" % (i.address, i.mnemonic, i.op_str))
-        sys.stderr.write("\n")
 
     def init_thread(self, tid, block_head):
         # Create the current function in the Function Manager
+        l.info(f"TID {tid}: Initializing thread")
         initial = self.functions.function(addr=block_head, create=True)
 
         # create the self._current[tid] pair
@@ -247,11 +258,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             self.init_thread(tid, block_head=target)
 
         else:
-            self.process_type(target, job)        
+            self.process_type(self._current[tid].working.prev_jump_target, job)        
 
 
     # TODO: check if splitting works with call in the same function
     def process_group(self, job: CFGJob) -> None:
+        l.debug(f"TID {job.tid} processing group {hex(job.addr)}")
         tid = job.tid
         group : pyvex.IRSB = job.block_irsb
         working : BasicBlock = self._current[tid].working
@@ -304,6 +316,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             working = node
 
         self._current[tid].working = working
+        self._current[tid].working.prev_jump_target = job.destination
 
         # set the stack pointer of exit from the basic block
         node.exit_sp = job.exit_sp
@@ -314,6 +327,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
     def split_node(self, node, target, tid) -> BasicBlock :       
+        
+
 
         bytecode = lifted[node.addr]
         offset = target - node._irsb.addr
@@ -346,7 +361,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
     def process_type(self, target, job):
         
         tid = job.tid
-        l.info(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
+        l.debug(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
 
 
         
@@ -418,6 +433,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                         if node is not None:
                             assert isinstance(node, BasicBlock)
                             if not node.is_phantom and node.addr != t:
+                                IPython.embed()
                                 node = self.split_node(node, t, tid)
                         else:
                             node = BasicBlock(addr = t, graph=self._current[tid].function.transition_graph, is_phantom = True)
@@ -453,7 +469,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
                     return_node, ins_addr = rip
                     )    
 
-                l.debug(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
+                l.info(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
                 if self._callstack[tid] is None:
                     self._callstack[tid] = CallStack(rip, target, ret_addr=return_address, current=self._current[tid])
@@ -476,7 +492,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
             # TODO: find out if the edges to be addedd are necessary 
             self._current[tid].function._add_return_site(self._current[tid].working)
 
-            l.debug(f"TID {tid}: Returning to " + hex(target))
+            l.info(f"TID {tid}: Returning to " + hex(target))
 
             try:
                 if not self.should_target_be_tracked(target):
@@ -485,7 +501,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
                 (func, working_bb) = (self._callstack[tid].current.function, self._callstack[tid].current.working)
 
-                assert self._callstack[tid].ret_addr == target, IPython.embed()
+                assert self._callstack[tid].ret_addr == target
                 
                 self._callstack[tid] = self._callstack[tid].ret(target)
                 self._current[tid] = self.State(function=func, working=working_bb)
@@ -536,3 +552,72 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 AnalysesHub.register_default('CFGInstrace', CFGInstrace)
+
+
+# strange pyvex behavior
+'''
+
+In [1]: import pyvex
+
+In [2]: import archinfo
+
+In [3]: head = 0x7ff6568de3a5
+
+In [4]: bytecode = b'H\x8b\xc3L\x8d=Q\x1c\xff\xffI\x87\x84\xf7h\x92\x03\x00H\x85\xc0t\t'
+
+In [5]: x = pyvex.lift(bytecode, head, archinfo.ArchAMD64(), opt_level=-1)
+
+In [6]: x.constant_jump_targets
+Out[6]: {140695990821807, 140695990821820, 140695990821829}
+
+In [7]: [hex(x) for x in x.constant_jump_targets]
+Out[7]: ['0x7ff6568de3bc', '0x7ff6568de3c5', '0x7ff6568de3af']
+
+In [8]: x.pp()
+IRSB {
+   t0:Ity_I64 t1:Ity_I64 t2:Ity_I64 t3:Ity_I64 t4:Ity_I64 t5:Ity_I64 t6:Ity_I64 t7:Ity_I64 t8:Ity_I64 t9:Ity_I64 t10:Ity_I64 t11:Ity_I64 t12:Ity_I64 t13:Ity_I64 t14:Ity_I64 t15:Ity_I1 t16:Ity_I1 t17:Ity_I64 t18:Ity_I64 t19:Ity_I64 t20:Ity_I64 t21:Ity_I64 t22:Ity_I64
+
+   00 | ------ IMark(0x7ff6568de3a5, 3, 0) ------
+   01 | t9 = GET:I64(rbx)
+   02 | PUT(rax) = t9
+   03 | PUT(rip) = 0x00007ff6568de3a8
+   04 | ------ IMark(0x7ff6568de3a8, 7, 0) ------
+   05 | t0 = Add64(0x00007ff6568de3af,0xffffffffffff1c51)
+   06 | PUT(r15) = t0
+   07 | PUT(rip) = 0x00007ff6568de3af
+   08 | ------ IMark(0x7ff6568de3af, 8, 0) ------
+   09 | t13 = GET:I64(rsi)
+   10 | t12 = Shl64(t13,0x03)
+   11 | t14 = GET:I64(r15)
+   12 | t11 = Add64(t14,t12)
+   13 | t10 = Add64(t11,0x0000000000039268)
+   14 | t3 = t10
+   15 | t1 = LDle:I64(t3)
+   16 | t2 = GET:I64(rax)
+   17 | t5 = t1
+   18 | t(4,4294967295) = CASle(t3 :: (t5,None)->(t2,None))
+   19 | t15 = CasCmpNE64(t4,t5)
+   20 | if (t15) { PUT(rip) = 0x7ff6568de3af; Ijk_Boring }
+   21 | PUT(rax) = t1
+   22 | PUT(rip) = 0x00007ff6568de3b7
+   23 | ------ IMark(0x7ff6568de3b7, 3, 0) ------
+   24 | t8 = GET:I64(rax)
+   25 | t7 = GET:I64(rax)
+   26 | t6 = And64(t8,t7)
+   27 | PUT(cc_op) = 0x0000000000000014
+   28 | PUT(cc_dep1) = t6
+   29 | PUT(cc_dep2) = 0x0000000000000000
+   30 | PUT(rip) = 0x00007ff6568de3ba
+   31 | ------ IMark(0x7ff6568de3ba, 2, 0) ------
+   32 | t17 = GET:I64(cc_op)
+   33 | t18 = GET:I64(cc_dep1)
+   34 | t19 = GET:I64(cc_dep2)
+   35 | t20 = GET:I64(cc_ndep)
+   36 | t21 = amd64g_calculate_condition(0x0000000000000004,t17,t18,t19,t20):Ity_I64
+   37 | t16 = 64to1(t21)
+   38 | if (t16) { PUT(rip) = 0x7ff6568de3c5; Ijk_Boring }
+   39 | PUT(rip) = 0x00007ff6568de3bc
+   40 | t22 = GET:I64(rip)
+   NEXT: PUT(rip) = t22; Ijk_Boring
+}
+'''
