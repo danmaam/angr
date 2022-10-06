@@ -41,9 +41,8 @@ import IPython
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
+l.setLevel(logging.getLevelName('WARNING'))
 
-if sys.argv[1]:
-	l.setLevel(logging.getLevelName(sys.argv[1]))
 
 
 
@@ -155,7 +154,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 				self._lifting_context[tid].start_rsp = sp if self._lifting_context[tid].start_rsp is None else self._lifting_context[tid].start_rsp
 				self._lifting_context[tid].block_head = ip if self._lifting_context[tid].block_head is None else self._lifting_context[tid].block_head
-
+				
 				self._lifting_context[tid].bytecode += self.project.loader._instruction_map[ip][ts]
 
 				if is_dst:
@@ -189,10 +188,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 					# TODO: allow relifting without saving twice the bytecode
 					lifted[block_head] = bytecode 
-
-					if tid == 2:
-						self.disasm(bytecode, block_head)
-            
+			
 					break
 
 			else:
@@ -278,7 +274,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				# the node is a phantom one and must be converted to a non phantom
 				if node.is_phantom:
 					node.phantom_to_node(group)
-					working = node
 				else:
 					# TODO: handle self modifying code at the same address location
 					while node._irsb.jumpkind == 'Ijk_Splitted':
@@ -288,28 +283,27 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 						node = successors[0]                        
 
-					working = node
 
 			# TODO: differentiate between jump in middle of funciton or jump not to the first instruction \
 			# of a block
 
 			else:
-				working = self.split_node(node, group.addr, tid)
+				node = self.split_node(node, group.addr, tid)
 
 		else:
 			# there isn't any node with the address of the current group
 			# just create a new node
 			#l.debug(f"Creating new Basic Block for target {hex(group.addr)}")
 			node = BasicBlock(group.addr, group.size, self._current[tid].function.transition_graph, irsb=group)
-
-
 			self.model.add_node(node.addr, node)
-			# check for the beginning of the program
-			if working is not None:
-				self._current[tid].function._transit_to(working, node)
-			working = node
 
-		self._current[tid].working = working
+		
+		assert node is not None
+
+		if working is not None:
+			self._current[tid].function._transit_to(working, node)
+
+		self._current[tid].working = node
 		self._current[tid].working.prev_jump_target[tid] = job.destination
 
 
