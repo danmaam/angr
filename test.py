@@ -4,4 +4,4 @@ import IPython
 logging.getLogger('angr').setLevel('INFO')
 a = angr.project.load_trace('./bytecode.bin', 'x86_64')
 b = a.analyses.CFGInstrace('./trace.json', './avoid.bin')
-IPython.embed()
+print("END OF TEST!")

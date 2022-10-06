@@ -1,3 +1,4 @@
+from collections import defaultdict
 import logging
 from typing import List
 import pyvex
@@ -86,6 +87,7 @@ class BasicBlock(CodeNode):
 		# self._graph.add_node(self)
 
 		self.is_phantom = is_phantom
+		self.prev_jump_target = {}
 		
 
 	# TODO: for now just add the jumpkind at the end of the block construction

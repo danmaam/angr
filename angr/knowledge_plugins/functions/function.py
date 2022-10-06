@@ -873,7 +873,6 @@ class Function(Serializable):
     def _split_node(self, node, split_addr, car_bytecode, cdr_bytecode):
         #TODO: insert assert of node in transition_graph
         # assert the address of splitting is in range of the irsb
-
         assert node._irsb.addr < split_addr and split_addr <= node._irsb.addr + node._irsb.size
 
         # create the twos new IRSBs

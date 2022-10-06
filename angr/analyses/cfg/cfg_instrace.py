@@ -39,9 +39,12 @@ import archinfo
 
 import IPython
 
+logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
+
 if sys.argv[1]:
 	l.setLevel(logging.getLevelName(sys.argv[1]))
+
 
 
 # TODO: TI PREGO TROVA UN MODO MIGLIORE DI FARE IL BLOCK SPLIT FA SCHIFO
@@ -89,6 +92,14 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		def pp(self):
 			print(hex(self.working.addr))
 
+	class LiftingContext:
+		def __init__(self):
+			self.bytecode = b''
+			self.start_rsp = None
+			self.block_head = None
+
+
+
 	# Load the set of instructions that shouldn't be tracked
 	def load_libraries(self, x):
 		with open(x, "rb") as f:
@@ -120,33 +131,19 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		self._callstack = defaultdict(lambda: None)
 		self._current = defaultdict(lambda: self.State(function = None, working = None, sp = None))
-		self._block_head_per_thread = defaultdict(lambda: None)
-		self._parsed_bytecode_per_thread = defaultdict(lambda: b'')
-
-
-		self._ins_trace = open(trace, "rb")
-		
-		
-		self.avoided_addresses = {}
-
-		self.load_libraries(to_avoid_functions)
-		print(self.avoided_addresses)
-
+		self._lifting_context = defaultdict(lambda: self.LiftingContext())
 		self.lift_cache = {}
 		self.pruned_jumps = set()        
 
+		self._ins_trace = open(trace, "rb")	
+		
+		self.avoided_addresses = {}
+		self.load_libraries(to_avoid_functions)
 
-		self._analyze()
-
-		# shitty hacks just to test the code working
-		self._low_img = 0x5616e85e4000
-		self._high_img = 0x55b5326c9ab8        
+		self._analyze()   
 
 
 	def next_irsb_block(self, ts):
-		
-	
-
 		while True:
 			curr_chunk = self._ins_trace.read(21)
 
@@ -156,52 +153,53 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				tid =  struct.unpack('<I', curr_chunk[16:20])[0]
 				is_dst = struct.unpack('<B', curr_chunk[20:21])[0]                    
 
-				start_sp = sp if self._block_head_per_thread[tid] is None else start_sp
-				self._block_head_per_thread[tid] = ip if self._block_head_per_thread[tid] is None else self._block_head_per_thread[tid]
-				
+				self._lifting_context[tid].start_rsp = sp if self._lifting_context[tid].start_rsp is None else self._lifting_context[tid].start_rsp
+				self._lifting_context[tid].block_head = ip if self._lifting_context[tid].block_head is None else self._lifting_context[tid].block_head
 
-				
-				self._parsed_bytecode_per_thread[tid] += self.project.loader._instruction_map[ip][ts]
+				self._lifting_context[tid].bytecode += self.project.loader._instruction_map[ip][ts]
 
 				if is_dst:
 					dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
 					# end of the basic block, lift it to IRSB
-					bytecode = self._parsed_bytecode_per_thread[tid] 
-					
+					bytecode = self._lifting_context[tid].bytecode
+					block_head = self._lifting_context[tid].block_head
+
 					# check if the block is in lift cache
-					if self._block_head_per_thread[tid] in self.lift_cache.keys():
-						irsb = self.lift_cache[self._block_head_per_thread[tid]]
-					
-					else:
-						
-						irsb = pyvex.lift(bytecode, self._block_head_per_thread[tid],
-										archinfo.ArchAMD64())
+					if block_head in self.lift_cache.keys():
+						irsb = self.lift_cache[block_head]	
+
+					else:						
+						irsb = pyvex.lift(bytecode, block_head, archinfo.ArchAMD64())
 
 						while (irsb.size != len(bytecode)):
 							# TODO: find a solution to pyvex not lifting each part of bytecode
 							temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
 							irsb.extend(temp)
 
-						self.lift_cache[self._block_head_per_thread[tid]] = irsb
-
-						# clear the parsed bytecode
-
-					self._parsed_bytecode_per_thread[tid] = b''
+						self.lift_cache[block_head] = irsb
+					
+					# clear the lifting context for the current thread
 					next_ip = dst
 					exit_sp = sp
+					start_sp = self._lifting_context[tid].start_rsp
+
+					self._lifting_context[tid] = self.LiftingContext()
+
+					assert start_sp is not None					
+
 					# TODO: allow relifting without saving twice the bytecode
-					lifted[self._block_head_per_thread[tid]] = bytecode 
-					if sys.argv[2] and sys.argv[2] == '--disasm' and tid == 2:
-						self.disasm(bytecode, self._block_head_per_thread[tid])
-					if tid == 2 and ip == 0x7ff701401b30:
-						print("POROCDDIO BENEDETTO")
-						IPython.embed()               
+					lifted[block_head] = bytecode 
+
+					if tid == 2:
+						self.disasm(bytecode, block_head)
+            
 					break
 
 			else:
+				self._should_abort = True
 				return (-1,-1,-1,-1,-1, -1)
 
-		return (tid, self._block_head_per_thread[tid], irsb, next_ip, start_sp, exit_sp)
+		return (tid, block_head, irsb, next_ip, start_sp, exit_sp)
 
 		
 
@@ -255,11 +253,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			self.init_thread(tid, block_head=target)
 
 		else:
-			self.process_type(self._current[tid].working.prev_jump_target, job)        
+			self.process_type(self._current[tid].working.prev_jump_target[tid], job)        
 
 
 	# TODO: check if splitting works with call in the same function
 	def process_group(self, job: CFGJob) -> None:
+
 		l.debug(f"TID {job.tid} processing group {hex(job.addr)}")
 		tid = job.tid
 		group : pyvex.IRSB = job.block_irsb
@@ -295,8 +294,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			# of a block
 
 			else:
-				if group.addr == 0x07FF70140EC1A:
-					IPython.embed()
 				working = self.split_node(node, group.addr, tid)
 
 		else:
@@ -313,7 +310,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			working = node
 
 		self._current[tid].working = working
-		self._current[tid].working.prev_jump_target = job.destination
+		self._current[tid].working.prev_jump_target[tid] = job.destination
+
 
 		# set the stack pointer of exit from the basic block
 		self._current[tid].sp = job.exit_sp
@@ -384,8 +382,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 					self._current[tid].function.add_jumpout_site(self._current[tid].working)
+
+
 					# get stub function from call stack and pop the callstack
-					(caller, working_bb, ret_addr, sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)
+					(caller, working_bb, ret_addr, sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)					
 					self._callstack[tid] = self._callstack[tid].pop()
 
 					# add a fake return from the stub to the caller of the stub
@@ -561,7 +561,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		return
 
 	def _post_analysis(self) -> None:
-		IPython.embed()
 		print("End of analysis!")
 
 
