@@ -41,7 +41,7 @@ import IPython
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('WARNING'))
+l.setLevel(logging.getLevelName('INFO'))
 
 
 
