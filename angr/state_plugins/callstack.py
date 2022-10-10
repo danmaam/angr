@@ -16,7 +16,7 @@ class CallStack(SimStatePlugin):
     at the VERY BOTTOM of the stack, i.e. points to the return address.
     """
     def __init__(self, call_site_addr=0, func_addr=0, stack_ptr=0, ret_addr=0, jumpkind='Ijk_Call', next_frame: Optional['CallStack'] = None,
-                 invoke_return_variable=None, current=None):
+                 invoke_return_variable=None, current=None, bottom=False):
         super().__init__()
         self.state = None
         self.call_site_addr = call_site_addr
@@ -31,7 +31,8 @@ class CallStack(SimStatePlugin):
         self.procedure_data = None
         self.locals = {}
 
-        assert current is not None
+        if not bottom:
+            assert current is not None
         self.current = current
 
     #

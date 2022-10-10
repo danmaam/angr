@@ -1,3 +1,4 @@
+from ast import Call
 from collections import defaultdict
 from dis import Instruction
 from importlib.machinery import BYTECODE_SUFFIXES
@@ -110,7 +111,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				self.avoided_addresses[addr] = addr + size
 
 
-	def __init__(self, trace, to_avoid_functions, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None):
+	def __init__(self, trace, to_avoid_functions, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None, OS = 'Linux', plt_dump = None):
 		ForwardAnalysis.__init__(self, allow_merging=False)
 		CFGBase.__init__(
 			self,
@@ -132,14 +133,33 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self._current = defaultdict(lambda: self.State(function = None, working = None, sp = None))
 		self._lifting_context = defaultdict(lambda: self.LiftingContext())
 		self.lift_cache = {}
-		self.pruned_jumps = set()        
+		self.pruned_jumps = set()       
+		self.OS = OS 
+	
 
 		self._ins_trace = open(trace, "rb")	
 		
+		if OS == 'Linux':
+			assert plt_dump is not None
+			self.plt_sections = []
+			with open(plt_dump, "rb") as f:
+				while True:
+					chunk = f.read(16)
+					if len(chunk) == 0:
+						break
+					start = struct.unpack('<q', chunk[:8])[0]
+					end = struct.unpack('<q', chunk[8:])[0]
+					self.plt_sections.append((start, end))
+					print(hex(start), hex(end))
+
+
 		self.avoided_addresses = {}
 		self.load_libraries(to_avoid_functions)
 
 		self._analyze()   
+
+	def is_plt_plt_got(self, target):
+		return any(target >= start and target < end for start, end in self.plt_sections)
 
 
 	def next_irsb_block(self, ts):
@@ -184,10 +204,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 					self._lifting_context[tid] = self.LiftingContext()
 
+					self.disasm(bytecode, block_head)
+
 					assert start_sp is not None					
 
 					# TODO: allow relifting without saving twice the bytecode
 					lifted[block_head] = bytecode 
+
 			
 					break
 
@@ -209,11 +232,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 	def init_thread(self, tid, block_head):
 		# Create the current function in the Function Manager
-		l.info(f"TID {tid}: Initializing thread")
+		l.info(f"TID {tid}: Initializing thread func: {hex(block_head)}")
 		initial = self.functions.function(addr=block_head, create=True)
 
 		# create the self._current[tid] pair
 		self._current[tid] = self.State(function = initial, working = None)
+		self._callstack[tid] = CallStack(bottom=True)
 
 
 	def _pre_analysis(self):
@@ -225,7 +249,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		# TODO: process in parallel each thread
 		# First try with trace at timestamp 0 and thread 0
-		(tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(0)
+		while True:
+			(tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(0)
+			if self.should_target_be_tracked(block_head):
+				break
 
 		new_job = CFGJob(
 		   block_head, next_ip, block_irsb=irsb, tid=tid, start_sp=start_sp, exit_sp=exit_sp)
@@ -240,13 +267,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		l.debug("Job queue is empty. Stopping.")
 
 	def _pre_job_handling(self, job: CFGJob) -> None:
-		target = job.destination
 		tid = job.tid
 
 		# Before going on with the job, we need to initialize the thread context
 		# or to process the type of the previous working block 
 		if self._current[tid].function is None:
-			self.init_thread(tid, block_head=target)
+			self.init_thread(job.tid, block_head=job.addr)
 
 		else:
 			self.process_type(self._current[tid].working.prev_jump_target[tid], job)        
@@ -288,7 +314,20 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			# of a block
 
 			else:
-				node = self.split_node(node, group.addr, tid)
+				# check if we are jumping in the middle of a block, or in the middle of
+				# an instruction
+
+				if group.addr in node._irsb.instruction_addresses:
+					# we are jumping in the middle of the block; need to split it
+					node = self.split_node(node, group.addr, tid)
+				else:
+					# we are jumping in the middle of an instruction
+					# need to create a new node
+					l.info(f"TID {tid}: detected jump in middle of instruction at {hex(group.addr)}")
+					node = BasicBlock(group.addr, group.size, self._current[tid].function.transition_graph, irsb=group)
+					self.model.add_node(node.addr, node)
+				
+
 
 		else:
 			# there isn't any node with the address of the current group
@@ -380,7 +419,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 					# get stub function from call stack and pop the callstack
 					(caller, working_bb, ret_addr, sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)					
+
 					self._callstack[tid] = self._callstack[tid].pop()
+
 
 					# add a fake return from the stub to the caller of the stub
 					self._current[tid].function._fakeret_to(self._current[tid].working, caller)
@@ -388,7 +429,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					# set the new state
 					self._current[tid] = self.State(function=caller, working=working_bb, sp = sp, entry_rsp=entry_rsp)
 
-					l.info(f"TID {tid}: Rax dispatcher, popping {hex(ret_addr)}")
+					l.info(f"TID {tid}: Jump stub, returning to {hex(ret_addr)}")
 					l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
 					return
 
@@ -396,21 +437,23 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				# it's not a call to a library function; apply heuristics for call similarity
 				# 2. exclusion checks		
 
-				if  self._current[tid].rsp_at_entrypoint != self._current[tid].sp or \
+
+				if  self.OS == 'Linux' and self.is_plt_plt_got(target) and self.is_plt_plt_got(rip) or \
+					self._current[tid].rsp_at_entrypoint != self._current[tid].sp or \
 					self._current[tid].function.addr <= target and target <= rip or \
-					rip <= target and target <= self._callstack[tid].ret_addr:
+					any(rip <= target and target <= ret for ret in self._current[tid].function.ret_sites):
 
 					self.pruned_jumps.add(rip)
 					is_jump = True
 
 				else:            
-					# 3. inclusion checks
-					func_map = self.functions._function_map
 
-					# TODO: remember to remove the True in the if
+					# inclusion checks
+					# TODO: add support for function with multiple entry points
+					#IPython.embed()
 					if  self.functions.function(addr=target) or \
 						target <= self._current[tid].function.addr or \
-						any(rip <= func and func <= target for func in func_map.keys()):
+						any(rip <= func and func <= target for func in self.functions._function_map.keys()):
 						
 						l.info(f"TID {tid}: @{hex(rip)} Detected a call with call similarity heuristics with dst {hex(target)}")
 						# Heuristics show it's a call. Fix the current function with the effectively called
