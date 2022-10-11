@@ -1,6 +1,7 @@
 from ast import Call
 from collections import defaultdict
 from dis import Instruction
+from enum import Enum
 from importlib.machinery import BYTECODE_SUFFIXES
 from inspect import trace
 from multiprocessing.sharedctypes import Value
@@ -56,7 +57,7 @@ class CFGJob():
 				 last_addr: Optional[int] = None,
 				 src_node: Optional[CFGNode] = None, src_ins_addr: Optional[int] = None,
 				 src_stmt_idx: Optional[int] = None, returning_source=None, syscall: bool = False, thread = '0',
-				 start_sp: int = None, exit_sp = None):
+				 start_sp: int = None, exit_sp = None, opcode = None):
 		self.addr = addr
 		self.destination = destination
 		self.last_addr = last_addr
@@ -72,6 +73,9 @@ class CFGJob():
 		self.exit_sp = exit_sp
 
 		self.tid = tid
+
+		assert opcode is not None
+		self.opcode = opcode
 		
 
 class CFGInstrace(ForwardAnalysis, CFGBase):
@@ -162,63 +166,93 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		return any(target >= start and target < end for start, end in self.plt_sections)
 
 
-	def next_irsb_block(self, ts):
+	def process_instruction(self, ts):
+
+		curr_chunk = curr_chunk = self._ins_trace.read(20)
+		ip = struct.unpack('<Q', curr_chunk[:8])[0]
+		sp = struct.unpack('<Q', curr_chunk[8:16])[0]
+		tid =  struct.unpack('<I', curr_chunk[16:20])[0]
+
+		self._lifting_context[tid].start_rsp = sp if self._lifting_context[tid].start_rsp is None else self._lifting_context[tid].start_rsp
+		self._lifting_context[tid].block_head = ip if self._lifting_context[tid].block_head is None else self._lifting_context[tid].block_head
+		
+		self._lifting_context[tid].bytecode += self.project.loader._instruction_map[ip][ts]
+
+		return (sp, tid)
+
+
+	def close_basic_block(self, tid):
+		dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
+		# end of the basic block, lift it to IRSB
+		bytecode = self._lifting_context[tid].bytecode
+		block_head = self._lifting_context[tid].block_head
+
+		# check if the block is in lift cache
+		if block_head in self.lift_cache.keys():
+			irsb = self.lift_cache[block_head]	
+
+		else:						
+			irsb = pyvex.lift(bytecode, block_head, archinfo.ArchAMD64())
+
+			while (irsb.size != len(bytecode)):
+				# TODO: find a solution to pyvex not lifting each part of bytecode
+				temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
+				irsb.extend(temp)
+
+			self.lift_cache[block_head] = irsb
+		
+		# clear the lifting context for the current thread
+		next_ip = dst
+		start_sp = self._lifting_context[tid].start_rsp
+		assert start_sp is not None
+
+		self._lifting_context[tid] = self.LiftingContext()		
+
+
+		self.disasm(bytecode, block_head)
+
+
+		# TODO: allow relifting without saving twice the bytecode
+		lifted[block_head] = bytecode 
+
+		return (irsb, next_ip, block_head, start_sp)
+
+
+	class Operation(Enum):
+		NEW_BASIC_BLOCK = 0
+		RAISE_SIGNAL = 1
+		RETURN_FROM_SIGNAL = 2
+
+	def next_operation(self, ts):
 		while True:
-			curr_chunk = self._ins_trace.read(21)
-
-			if curr_chunk:
-				ip = struct.unpack('<Q', curr_chunk[:8])[0]
-				sp = struct.unpack('<Q', curr_chunk[8:16])[0]
-				tid =  struct.unpack('<I', curr_chunk[16:20])[0]
-				is_dst = struct.unpack('<B', curr_chunk[20:21])[0]                    
-
-				self._lifting_context[tid].start_rsp = sp if self._lifting_context[tid].start_rsp is None else self._lifting_context[tid].start_rsp
-				self._lifting_context[tid].block_head = ip if self._lifting_context[tid].block_head is None else self._lifting_context[tid].block_head
-				
-				self._lifting_context[tid].bytecode += self.project.loader._instruction_map[ip][ts]
-
-				if is_dst:
-					dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
-					# end of the basic block, lift it to IRSB
-					bytecode = self._lifting_context[tid].bytecode
-					block_head = self._lifting_context[tid].block_head
-
-					# check if the block is in lift cache
-					if block_head in self.lift_cache.keys():
-						irsb = self.lift_cache[block_head]	
-
-					else:						
-						irsb = pyvex.lift(bytecode, block_head, archinfo.ArchAMD64())
-
-						while (irsb.size != len(bytecode)):
-							# TODO: find a solution to pyvex not lifting each part of bytecode
-							temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
-							irsb.extend(temp)
-
-						self.lift_cache[block_head] = irsb
-					
-					# clear the lifting context for the current thread
-					next_ip = dst
-					exit_sp = sp
-					start_sp = self._lifting_context[tid].start_rsp
-
-					self._lifting_context[tid] = self.LiftingContext()
-
-					self.disasm(bytecode, block_head)
-
-					assert start_sp is not None					
-
-					# TODO: allow relifting without saving twice the bytecode
-					lifted[block_head] = bytecode 
-
+			opcode = self._ins_trace.read(1)
 			
-					break
+			if opcode:
+				match opcode:
+					# plain instruction
+					case b"\x00":
+						self.process_instruction(ts)
+
+					# basic block end
+					case b"\x01":
+						(exit_sp, tid) = self.process_instruction(ts)
+						(irsb, next_ip, block_head, start_sp) = self.close_basic_block(tid)						
+						
+						return (self.Operation.NEW_BASIC_BLOCK, tid, block_head, irsb, next_ip, start_sp, exit_sp)
+					# raise of a signal
+					case b"\x02":
+						pass
+						return (self.Operation.RAISE_SIGNAL,)
+					# returning from a signal
+					case b"\x03":
+						pass
+						return (self.Operation.RETURN_FROM_SIGNAL,)
+					case _:
+						raise Exception("Unknown opcode")
 
 			else:
 				self._should_abort = True
-				return (-1,-1,-1,-1,-1, -1)
-
-		return (tid, block_head, irsb, next_ip, start_sp, exit_sp)
+				return
 
 		
 
@@ -250,12 +284,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		# TODO: process in parallel each thread
 		# First try with trace at timestamp 0 and thread 0
 		while True:
-			(tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(0)
+			(opcode, tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_operation(0)
+
 			if self.should_target_be_tracked(block_head):
 				break
-
+		
 		new_job = CFGJob(
-		   block_head, next_ip, block_irsb=irsb, tid=tid, start_sp=start_sp, exit_sp=exit_sp)
+		   block_head, next_ip, block_irsb=irsb, tid=tid, start_sp=start_sp, exit_sp=exit_sp, opcode=opcode)
 		self._insert_job(new_job)
 
 
@@ -271,11 +306,18 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		# Before going on with the job, we need to initialize the thread context
 		# or to process the type of the previous working block 
-		if self._current[tid].function is None:
-			self.init_thread(job.tid, block_head=job.addr)
 
-		else:
-			self.process_type(self._current[tid].working.prev_jump_target[tid], job)        
+		match job.opcode:
+			case self.Operation.NEW_BASIC_BLOCK:
+				if self._current[tid].function is None:
+					self.init_thread(job.tid, block_head=job.addr)
+
+				else:
+					self.process_type(self._current[tid].working.prev_jump_target[tid], job)    
+
+				self.process_group(job)		
+			case _ :
+				raise NotImplementedError("Operation not yet implemented")
 
 
 	# TODO: check if splitting works with call in the same function
@@ -418,7 +460,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 					# get stub function from call stack and pop the callstack
-					(caller, working_bb, ret_addr, sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)					
+					(caller, working_bb, ret_addr, exit_sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)					
 
 					self._callstack[tid] = self._callstack[tid].pop()
 
@@ -427,7 +469,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					self._current[tid].function._fakeret_to(self._current[tid].working, caller)
 
 					# set the new state
-					self._current[tid] = self.State(function=caller, working=working_bb, sp = sp, entry_rsp=entry_rsp)
+					self._current[tid] = self.State(function=caller, working=working_bb, sp = exit_sp, entry_rsp=entry_rsp)
 
 					l.info(f"TID {tid}: Jump stub, returning to {hex(ret_addr)}")
 					l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
@@ -450,7 +492,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 					# inclusion checks
 					# TODO: add support for function with multiple entry points
-					#IPython.embed()
 					if  self.functions.function(addr=target) or \
 						target <= self._current[tid].function.addr or \
 						any(rip <= func and func <= target for func in self.functions._function_map.keys()):
@@ -566,21 +607,38 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				pass
 			except SimEmptyCallStackError:
 				l.warning("Stack empty")
+		
+		else:
+			raise NotImplementedError("Unsupported jumpkind: " + jumpkind)
 
 
 	# TODO: handle multiple timestamps for self modifying code 
 	# From the execution trace, detects and create the next IR group to be processed
 	def _get_successors(self, job: CFGJob) -> List[CFGJob]:
 
-		self.process_group(job)
-
-		(tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_irsb_block(0)
+		
+		result = self.next_operation(0)
 
 		if self.should_abort:
 			return []
 
+		else:
+			try:
+				opcode, *args = result
+			except:
+				IPython.embed()
+			
+			match opcode:
+				case self.Operation.NEW_BASIC_BLOCK:
+					tid, block_head, irsb, next_ip, start_sp, exit_sp = args
+				case self.Operation.RAISE_SIGNAL:
+					raise NotImplementedError("Raise signal not yet implemented")
+				case self.Operation.RETURN_FROM_SIGNAL:
+					raise NotImplementedError("Return from signal not yet implemented")
 
-		new_job = CFGJob(block_head, next_ip, irsb, thread = job.thread, tid=tid, start_sp=start_sp, exit_sp=exit_sp)
+
+		assert opcode is not None
+		new_job = CFGJob(block_head, next_ip, irsb, thread = job.thread, tid=tid, start_sp=start_sp, exit_sp=exit_sp, opcode = opcode)
 
 		return [new_job]
 		

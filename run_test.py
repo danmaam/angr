@@ -71,7 +71,6 @@ a = angr.project.load_trace(bytecode, 'x86_64')
 b = a.analyses.CFGInstrace(trace, avoid, OS = args.operating_system, plt_dump = plt)
 
 
-IPython.embed()
 for func, edges in funcs.items():
     function = b.functions.function(addr=base_address + func)
     assert function is not None
@@ -81,7 +80,7 @@ for func, edges in funcs.items():
         for dst in dsts:
             dst_node = b.model.get_node(base_address + dst)
             assert dst_node is not None
-            assert function.transition_graph.has_edge(src_node, dst_node), IPython.embed()
+            assert function.transition_graph.has_edge(src_node, dst_node)
 
 print(" === TEST PASSED === ")
 
