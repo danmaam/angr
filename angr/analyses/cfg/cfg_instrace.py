@@ -53,30 +53,32 @@ lifted = {}
 
 splitted = set()
 class CFGJob():
-	def __init__(self, addr: int, destination: int, block_irsb : pyvex.IRSB, tid : int,
-				 last_addr: Optional[int] = None,
-				 src_node: Optional[CFGNode] = None, src_ins_addr: Optional[int] = None,
-				 src_stmt_idx: Optional[int] = None, returning_source=None, syscall: bool = False, thread = '0',
-				 start_sp: int = None, exit_sp = None, opcode = None):
-		self.addr = addr
+	def __init__(self, opcode, destination: int, tid : int, addr : int):
+		
 		self.destination = destination
-		self.last_addr = last_addr
-		self.src_node = src_node
-		self.src_ins_addr = src_ins_addr
-		self.src_stmt_idx = src_stmt_idx
-		self.returning_source = returning_source
-		self.syscall = syscall
-		self.block_irsb = block_irsb
-		self.thread = thread
+		self.tid = tid
+		self.opcode = opcode
+		self.addr = addr
+	
+
+class BasicBlockJob(CFGJob):
+	def __init__(self, opcode, destination: int, tid: int, addr: int, start_sp: int = None, \
+				 exit_sp=None, block_irsb: pyvex.IRSB = None):
+		super().__init__(opcode, destination, tid, addr)
+	
+		self.block_irsb = block_irsb 
 
 		self.start_sp = start_sp
 		self.exit_sp = exit_sp
 
-		self.tid = tid
+class SignalJob(CFGJob):
+	def __init__(self, opcode, destination: int, tid: int, addr : int = None, signal_id : int = None):
+		super().__init__(opcode, destination, tid, addr)
+		self.signal_id = signal_id
 
-		assert opcode is not None
-		self.opcode = opcode
-		
+
+
+
 
 class CFGInstrace(ForwardAnalysis, CFGBase):
 	"""
@@ -160,13 +162,41 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self.avoided_addresses = {}
 		self.load_libraries(to_avoid_functions)
 
+
+		self._job_dispatcher = {b"\x01": self.process_basic_block_job, b"\x02": self.process_raised_signal, b"\x03": self.process_return_from_signal}
+
+		self._job_factory = {
+			b"\x00": self.OP_new_instruction,
+			b"\x01": self.OP_new_basic_block,
+			b"\x02": self.OP_raise_signal,
+			b"\x03": self.OP_return_signal
+		}
+
+		self._state_stack = defaultdict(lambda: [])
 		self._analyze()   
+
+
+
+
+
+	def process_basic_block_job(self, job: CFGJob):
+		tid = job.tid
+
+		if self._current[tid].function is None:
+			self.init_thread(job.tid, block_head=job.addr)
+
+		else:
+			self.process_type(self._current[tid].working.prev_jump_target[tid], job)    
+
+		self.process_group(job)
+
+
 
 	def is_plt_plt_got(self, target):
 		return any(target >= start and target < end for start, end in self.plt_sections)
 
 
-	def process_instruction(self, ts):
+	def OP_new_instruction(self, opcode):
 
 		curr_chunk = curr_chunk = self._ins_trace.read(20)
 		ip = struct.unpack('<Q', curr_chunk[:8])[0]
@@ -176,12 +206,15 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self._lifting_context[tid].start_rsp = sp if self._lifting_context[tid].start_rsp is None else self._lifting_context[tid].start_rsp
 		self._lifting_context[tid].block_head = ip if self._lifting_context[tid].block_head is None else self._lifting_context[tid].block_head
 		
-		self._lifting_context[tid].bytecode += self.project.loader._instruction_map[ip][ts]
+		self._lifting_context[tid].bytecode += self.project.loader._instruction_map[ip]
 
 		return (sp, tid)
 
 
-	def close_basic_block(self, tid):
+	def OP_new_basic_block(self, opcode):
+
+		(exit_sp, tid) = self.OP_new_instruction(opcode)
+
 		dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
 		# end of the basic block, lift it to IRSB
 		bytecode = self._lifting_context[tid].bytecode
@@ -215,40 +248,66 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		# TODO: allow relifting without saving twice the bytecode
 		lifted[block_head] = bytecode 
 
-		return (irsb, next_ip, block_head, start_sp)
+		return BasicBlockJob(opcode, next_ip, tid, block_head, block_irsb = irsb, start_sp = start_sp, exit_sp = exit_sp)
+
+	def OP_raise_signal(self, opcode):
+		chunk = self._ins_trace.read(21)
+		
+		sig_id = struct.unpack("<B", chunk[0:1])[0]
+		src = struct.unpack("<Q", chunk [1:9])[0]
+		target = struct.unpack("<Q", chunk [9:17])[0]
+		tid = struct.unpack("<I", chunk[17:21])[0]		
+
+		return SignalJob(opcode, destination=target, tid=tid, signal_id=sig_id)
+
+	def OP_return_signal(self, opcode):
+		chunk = self._ins_trace.read(12)
+		
+		target = struct.unpack("<Q", chunk[0:8])[0]
+		tid = struct.unpack("<I", chunk [8:12])[0]
 
 
-	class Operation(Enum):
-		NEW_BASIC_BLOCK = 0
-		RAISE_SIGNAL = 1
-		RETURN_FROM_SIGNAL = 2
+		return SignalJob(opcode, destination=target, tid=tid)			
+	
+	def process_return_from_signal(self, job: SignalJob):
+		
+		tid = job.tid
+		target = job.destination
 
-	def next_operation(self, ts):
+		
+		# there we should add return site
+		IPython.embed()
+		
+		# restore state context
+		self._current[tid], self._callstack[tid] = self._state_stack[tid].pop(0)
+		return
+
+
+
+
+
+
+	def process_raised_signal(self, job: SignalJob):
+		tid = job.tid
+		# for now just add a callsite
+		# TODO: improve signal raise location
+		self._current[tid].function._add_call_site(self._current[tid].working._irsb.instruction_addresses[-1], job.destination, None)
+
+		self._state_stack[tid].insert(0, (self._current[tid], self._callstack[tid]))
+
+		self._current[tid] = self.State()
+		self._callstack[tid] = CallStack(bottom=True)
+
+
+	def get_next_job(self, pre = False):
 		while True:
 			opcode = self._ins_trace.read(1)
-			
-			if opcode:
-				match opcode:
-					# plain instruction
-					case b"\x00":
-						self.process_instruction(ts)
 
-					# basic block end
-					case b"\x01":
-						(exit_sp, tid) = self.process_instruction(ts)
-						(irsb, next_ip, block_head, start_sp) = self.close_basic_block(tid)						
-						
-						return (self.Operation.NEW_BASIC_BLOCK, tid, block_head, irsb, next_ip, start_sp, exit_sp)
-					# raise of a signal
-					case b"\x02":
-						pass
-						return (self.Operation.RAISE_SIGNAL,)
-					# returning from a signal
-					case b"\x03":
-						pass
-						return (self.Operation.RETURN_FROM_SIGNAL,)
-					case _:
-						raise Exception("Unknown opcode")
+			if opcode:
+				
+				job = self._job_factory[opcode](opcode)
+				if isinstance(job, CFGJob) and (not pre or self.should_target_be_tracked(job.addr)):
+					return job
 
 			else:
 				self._should_abort = True
@@ -275,23 +334,14 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 	def _pre_analysis(self):
-		# build basic blocks from the instruction trace
-		# need to emulate the trace for each thread
 		# TODO: handle self modifying code
 
 		self._initialize_cfg()
 
 		# TODO: process in parallel each thread
 		# First try with trace at timestamp 0 and thread 0
-		while True:
-			(opcode, tid, block_head, irsb, next_ip, start_sp, exit_sp) = self.next_operation(0)
-
-			if self.should_target_be_tracked(block_head):
-				break
-		
-		new_job = CFGJob(
-		   block_head, next_ip, block_irsb=irsb, tid=tid, start_sp=start_sp, exit_sp=exit_sp, opcode=opcode)
-		self._insert_job(new_job)
+		job = self.get_next_job(pre = True)
+		self._insert_job(job)
 
 
 
@@ -302,22 +352,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		l.debug("Job queue is empty. Stopping.")
 
 	def _pre_job_handling(self, job: CFGJob) -> None:
-		tid = job.tid
-
-		# Before going on with the job, we need to initialize the thread context
-		# or to process the type of the previous working block 
-
-		match job.opcode:
-			case self.Operation.NEW_BASIC_BLOCK:
-				if self._current[tid].function is None:
-					self.init_thread(job.tid, block_head=job.addr)
-
-				else:
-					self.process_type(self._current[tid].working.prev_jump_target[tid], job)    
-
-				self.process_group(job)		
-			case _ :
-				raise NotImplementedError("Operation not yet implemented")
+		try:
+			self._job_dispatcher[job.opcode](job)
+		except KeyError:
+			raise NotImplementedError(f"Operation {job.opcode} not yet implemented")
 
 
 	# TODO: check if splitting works with call in the same function
@@ -617,30 +655,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def _get_successors(self, job: CFGJob) -> List[CFGJob]:
 
 		
-		result = self.next_operation(0)
+		job = self.get_next_job()
 
 		if self.should_abort:
 			return []
 
-		else:
-			try:
-				opcode, *args = result
-			except:
-				IPython.embed()
-			
-			match opcode:
-				case self.Operation.NEW_BASIC_BLOCK:
-					tid, block_head, irsb, next_ip, start_sp, exit_sp = args
-				case self.Operation.RAISE_SIGNAL:
-					raise NotImplementedError("Raise signal not yet implemented")
-				case self.Operation.RETURN_FROM_SIGNAL:
-					raise NotImplementedError("Return from signal not yet implemented")
-
-
-		assert opcode is not None
-		new_job = CFGJob(block_head, next_ip, irsb, thread = job.thread, tid=tid, start_sp=start_sp, exit_sp=exit_sp, opcode = opcode)
-
-		return [new_job]
+		return [job]
 		
 
 	# it isn't necessary to implement a post job handler

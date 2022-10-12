@@ -21,26 +21,25 @@ class DynamicRecoveredInstructions(Backend):
         self.loader._instruction_map = defaultdict(dict)
         """
         FILE FORMAT
-        [INSTRUCTION ADDRESS][TIMESTAMP][INSTRUCTION SIZE][INSTRUCTION BYTECODE]
-        [       8 BYTE      ][  8 BYTE ][      8 BYTE    ][     SIZE-BYTES     ]
+        [INSTRUCTION ADDRESS][INSTRUCTION SIZE][INSTRUCTION BYTECODE]
+        [       8 BYTE      ][      8 BYTE    ][     SIZE-BYTES     ]
         """
         while True:
-            curr = self._binary_stream.read(24)
+            curr = self._binary_stream.read(9)
             if (len(curr) == 0):
                 break
             insaddr = struct.unpack("<Q", curr[0:8])[0]
-            timestamp = struct.unpack("<Q", curr[8:16])[0]
-            size = struct.unpack("<Q", curr[16:24])[0]
+            size = struct.unpack("<B", curr[8:9])[0]
 
             bytecode = self._binary_stream.read(size)
 
-            self._add_instruction(insaddr, bytecode, timestamp)
+            self._add_instruction(insaddr, bytecode)
 
-    def _add_instruction(self, instruction_address, bytecode, timestamp):
+    def _add_instruction(self, instruction_address, bytecode):
         """
         Adds a bytecode instruction to the Clememory of the project
         """
-        self.loader._instruction_map[instruction_address][timestamp] = bytecode
+        self.loader._instruction_map[instruction_address] = bytecode
 
 register_backend("dyninstruction", DynamicRecoveredInstructions)
 
