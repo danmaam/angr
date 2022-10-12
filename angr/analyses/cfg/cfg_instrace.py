@@ -43,7 +43,7 @@ import IPython
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('INFO'))
+l.setLevel(logging.getLevelName('DEBUG'))
 
 
 
@@ -276,7 +276,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		
 		# there we should add return site
-		IPython.embed()
 		
 		# restore state context
 		self._current[tid], self._callstack[tid] = self._state_stack[tid].pop(0)
@@ -472,6 +471,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		working : BasicBlock = self._current[tid].working
 		jumpkind = working._irsb.jumpkind
 		rip = working._irsb.instruction_addresses[-1]
+
+		if rip == 0x4011b4:
+			IPython.embed()
 
 		# get all the possible jump targets from the current block
 		jump_targets = working._irsb.constant_jump_targets.copy()
