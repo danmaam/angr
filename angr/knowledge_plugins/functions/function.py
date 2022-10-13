@@ -870,39 +870,22 @@ class Function(Serializable):
         self._call_sites[call_site_addr] = (call_target_addr, retn_addr)
 
 
-    def _split_node(self, node, split_addr, car_bytecode, cdr_bytecode):
-        assert node._irsb.addr < split_addr and split_addr <= node._irsb.addr + node._irsb.size  
+    def _split_node(self, node, car_bb, cdr_bb):
 
-        assert node.addr in self.block_addrs_set
+        assert node.addr in self.block_addrs_set       
 
-        # create the twos new IRSBs
-        car_irsb = pyvex.lift(car_bytecode, node._irsb.addr, archinfo.ArchAMD64())
-        cdr_irsb = pyvex.lift(cdr_bytecode, split_addr, archinfo.ArchAMD64())
+        node_successors = map(lambda x: x[1], filter(lambda x: node.addr == x[0], self.transition_graph.edges))
+        node_predecessors = map(lambda x: x[0], filter(lambda x: node.addr == x[1], self.transition_graph.edges))
 
-        # set the jumpkind and the next field of the first IRSB
-        car_irsb.next = cdr_irsb
-        car_irsb.jumpkind = 'Ijk_Splitted'
-
-        # create the new basic blocks
-        car_bb = BasicBlock(car_irsb.addr, car_irsb.size, self.transition_graph, irsb=car_irsb)
-        cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self.transition_graph, irsb=cdr_irsb)
-
-        for s in node.successors():
+        for s in node_successors:
             self.transition_graph.remove_edge(node, s)
             self.transition_graph.add_edge(cdr_bb, s)
 
-
-
-
-        for p in node.predecessors():
+        for p in node_predecessors:
             self.transition_graph.remove_edge(p, node)
             self.transition_graph.add_edge(p, car_bb)
 
-
-
         self._transit_to(car_bb, cdr_bb)
-
-        return (car_bb, cdr_bb)
             
 
     def _add_endpoint(self, endpoint_node, sort):

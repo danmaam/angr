@@ -43,7 +43,7 @@ import IPython
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('DEBUG'))
+l.setLevel(logging.getLevelName('WARNING'))
 
 
 
@@ -434,29 +434,49 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 
-	def split_node(self, node, target, tid) -> BasicBlock :       
-		l.info(f"TID {tid}: Splitting node at " + hex(target))
+	def split_node(self, node, split_addr, tid) -> BasicBlock :       
+		l.info(f"TID {tid}: Splitting node at " + hex(split_addr))
 		bytecode = lifted[node.addr]
-		offset = target - node._irsb.addr
+		offset = split_addr - node._irsb.addr
 
 		car_bytecode = bytecode[:offset]
 		cdr_bytecode = bytecode[offset:]
 
 		# split the node
-		(a, b) =  self._current[tid].function._split_node(node, target, car_bytecode, cdr_bytecode)
+
+		assert node._irsb.addr < split_addr and split_addr <= node._irsb.addr + node._irsb.size  
+
+		# create the twos new IRSBs
+		car_irsb = pyvex.lift(car_bytecode, node._irsb.addr, archinfo.ArchAMD64())
+		cdr_irsb = pyvex.lift(cdr_bytecode, split_addr, archinfo.ArchAMD64())
+
+		# set the jumpkind and the next field of the first IRSB
+		car_irsb.next = cdr_irsb
+		car_irsb.jumpkind = 'Ijk_Splitted'
+
+		# create the new basic blocks
+		car_bb = BasicBlock(car_irsb.addr, car_irsb.size, node._graph, irsb=car_irsb)
+		cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, node._graph, irsb=cdr_irsb)
+		
+		# find functions that contains the original block
+		funcs_with_block = filter(lambda x: self._current[tid].working.addr in x._local_block_addrs, self.functions._function_map.values())
+		
+		for func in funcs_with_block:
+			func._split_node(node, car_bb, cdr_bb)
+		
 
 		# update the lifted bytecode
 		lifted[node._irsb.addr] = car_bytecode
-		lifted[target] = cdr_bytecode
+		lifted[split_addr] = cdr_bytecode
 
 		self.model.remove_node(node.addr, node)
-		self.model.add_node(a.addr, a)
-		self.model.add_node(b.addr, b)
+		self.model.add_node(car_bb.addr, car_bb)
+		self.model.add_node(cdr_bb.addr, cdr_bb)
 
-		splitted.add(a.addr)
-		splitted.add(b.addr)
+		splitted.add(car_bb.addr)
+		splitted.add(cdr_bb.addr)
 
-		return b
+		return cdr_bb
 	
 	def should_target_be_tracked(self, target):
 		for (x,y) in self.avoided_addresses.items():
@@ -533,7 +553,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				else:            
 
 					# inclusion checks
-					# TODO: add support for function with multiple entry points
+					# TODO: make the check with filter better
 					if  self.functions.function(addr=target) or \
 						target <= self._current[tid].function.addr or \
 						len(list(filter(lambda x: self._current[tid].working.addr in x._local_block_addrs, self.functions._function_map.values()))) == 1 and \
