@@ -39,3 +39,4 @@ share/
 bytecode.bin
 trace.json
 avoid.bin
+*.elf

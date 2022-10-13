@@ -871,9 +871,9 @@ class Function(Serializable):
 
 
     def _split_node(self, node, split_addr, car_bytecode, cdr_bytecode):
-        #TODO: insert assert of node in transition_graph
-        # assert the address of splitting is in range of the irsb
-        assert node._irsb.addr < split_addr and split_addr <= node._irsb.addr + node._irsb.size
+        assert node._irsb.addr < split_addr and split_addr <= node._irsb.addr + node._irsb.size  
+
+        assert node.addr in self.block_addrs_set
 
         # create the twos new IRSBs
         car_irsb = pyvex.lift(car_bytecode, node._irsb.addr, archinfo.ArchAMD64())
@@ -887,13 +887,11 @@ class Function(Serializable):
         car_bb = BasicBlock(car_irsb.addr, car_irsb.size, self.transition_graph, irsb=car_irsb)
         cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, self.transition_graph, irsb=cdr_irsb)
 
-        try:
-            for s in node.successors():
-                self.transition_graph.remove_edge(node, s)
-                self.transition_graph.add_edge(cdr_bb, s)
-        except Exception as e:
-            print(repr(e))
-            IPython.embed()
+        for s in node.successors():
+            self.transition_graph.remove_edge(node, s)
+            self.transition_graph.add_edge(cdr_bb, s)
+
+
 
 
         for p in node.predecessors():

@@ -71,6 +71,8 @@ a = angr.project.load_trace(bytecode, 'x86_64')
 b = a.analyses.CFGInstrace(trace, avoid, OS = args.operating_system, plt_dump = plt)
 
 
+IPython.embed()
+
 for func, edges in funcs.items():
     function = b.functions.function(addr=base_address + func)
     assert function is not None

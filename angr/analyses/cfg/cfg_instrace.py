@@ -182,13 +182,14 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def process_basic_block_job(self, job: CFGJob):
 		tid = job.tid
 
-		if self._current[tid].function is None:
-			self.init_thread(job.tid, block_head=job.addr)
+		if self.should_target_be_tracked(job.addr):
+			if self._current[tid].function is None:
+				self.init_thread(job.tid, block_head=job.addr)
 
-		else:
-			self.process_type(self._current[tid].working.prev_jump_target[tid], job)    
+			else:
+				self.process_type(self._current[tid].working.prev_jump_target[tid], job)    
 
-		self.process_group(job)
+			self.process_group(job)
 
 
 
@@ -241,12 +242,14 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		self._lifting_context[tid] = self.LiftingContext()		
 
-
-		self.disasm(bytecode, block_head)
+		if l.level <= logging.DEBUG:
+			if self.should_target_be_tracked(block_head):
+				self.disasm(bytecode, block_head)
 
 
 		# TODO: allow relifting without saving twice the bytecode
 		lifted[block_head] = bytecode 
+
 
 		return BasicBlockJob(opcode, next_ip, tid, block_head, block_irsb = irsb, start_sp = start_sp, exit_sp = exit_sp)
 
@@ -269,16 +272,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		return SignalJob(opcode, destination=target, tid=tid)			
 	
-	def process_return_from_signal(self, job: SignalJob):
-		
+	def process_return_from_signal(self, job: SignalJob):		
 		tid = job.tid
-		target = job.destination
-
-		
+		target = job.destination		
 		# there we should add return site
 		
 		# restore state context
-		self._current[tid], self._callstack[tid] = self._state_stack[tid].pop(0)
+		(self._current[tid], self._callstack[tid]) = self._state_stack[tid].pop(0)
 		return
 
 
@@ -301,12 +301,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def get_next_job(self, pre = False):
 		while True:
 			opcode = self._ins_trace.read(1)
-
-			if opcode:
-				
+			if opcode:				
 				job = self._job_factory[opcode](opcode)
-				if isinstance(job, CFGJob) and (not pre or self.should_target_be_tracked(job.addr)):
+				if isinstance(job, CFGJob):
 					return job
+
 
 			else:
 				self._should_abort = True
@@ -359,6 +358,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 	# TODO: check if splitting works with call in the same function
 	def process_group(self, job: CFGJob) -> None:
+
+		
 
 		l.debug(f"TID {job.tid} processing group {hex(job.addr)}")
 		tid = job.tid
@@ -472,8 +473,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		jumpkind = working._irsb.jumpkind
 		rip = working._irsb.instruction_addresses[-1]
 
-		if rip == 0x4011b4:
-			IPython.embed()
 
 		# get all the possible jump targets from the current block
 		jump_targets = working._irsb.constant_jump_targets.copy()
@@ -519,11 +518,14 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				# it's not a call to a library function; apply heuristics for call similarity
 				# 2. exclusion checks		
 
+				if self._current[tid].working.addr == 0x7f33fba18fc0 and self._current[tid].function.addr == 0x7f33fba18fc0:
+					print("=== PORCODDIO ===")
+					# IPython.embed()
 
 				if  self.OS == 'Linux' and self.is_plt_plt_got(target) and self.is_plt_plt_got(rip) or \
 					self._current[tid].rsp_at_entrypoint != self._current[tid].sp or \
 					self._current[tid].function.addr <= target and target <= rip or \
-					any(rip <= target and target <= ret for ret in self._current[tid].function.ret_sites):
+					any(rip <= target and target <= ret.addr for ret in self._current[tid].function.ret_sites):
 
 					self.pruned_jumps.add(rip)
 					is_jump = True
@@ -534,7 +536,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					# TODO: add support for function with multiple entry points
 					if  self.functions.function(addr=target) or \
 						target <= self._current[tid].function.addr or \
+						len(list(filter(lambda x: self._current[tid].working.addr in x._local_block_addrs, self.functions._function_map.values()))) == 1 and \
 						any(rip <= func and func <= target for func in self.functions._function_map.keys()):
+
 						
 						l.info(f"TID {tid}: @{hex(rip)} Detected a call with call similarity heuristics with dst {hex(target)}")
 						# Heuristics show it's a call. Fix the current function with the effectively called
@@ -647,7 +651,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				pass
 			except SimEmptyCallStackError:
 				l.warning("Stack empty")
-		
+
+		elif jumpkind == "Ijk_Sys_syscall":
+			# don't anything. transition graph will be update in process group
+			pass 
+
 		else:
 			raise NotImplementedError("Unsupported jumpkind: " + jumpkind)
 
