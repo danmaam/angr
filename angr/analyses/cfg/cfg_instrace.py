@@ -218,7 +218,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
 		# end of the basic block, lift it to IRSB
-		bytecode = self._lifting_context[tid].bytecode
+
+		#TODO: DELETE THE REPLACE WHEN UNDERSTOOD HOW TO DEAL WITH PYVEX ISSUE				
+		bytecode = self._lifting_context[tid].bytecode.replace(b"\xf3H\x0f\x1e", b"\x90\x90\x90\x90").replace(b"\xf3\x0f\x1e", b"\x90\x90\x90").replace(b"\xc8H\x89G", b"\x90" * 4)
+
 		block_head = self._lifting_context[tid].block_head
 
 		# check if the block is in lift cache
@@ -231,7 +234,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			while (irsb.size != len(bytecode)):
 				# TODO: find a solution to pyvex not lifting each part of bytecode
 				temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
+				if temp.size == 0:
+					print("Extending with zero")
+					IPython.embed()
 				irsb.extend(temp)
+					
 
 			self.lift_cache[block_head] = irsb
 		
@@ -281,11 +288,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		(self._current[tid], self._callstack[tid]) = self._state_stack[tid].pop(0)
 		return
 
-
-
-
-
-
 	def process_raised_signal(self, job: SignalJob):
 		tid = job.tid
 		# for now just add a callsite
@@ -297,7 +299,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self._current[tid] = self.State()
 		self._callstack[tid] = CallStack(bottom=True)
 
-
 	def get_next_job(self, pre = False):
 		while True:
 			opcode = self._ins_trace.read(1)
@@ -306,13 +307,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				if isinstance(job, CFGJob):
 					return job
 
-
 			else:
 				self._should_abort = True
 				return
-
-		
-
 
 	def disasm(self, bytecode, block_head):
 		#FOR DEBUGGING PURPOSES
@@ -537,10 +534,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 				# it's not a call to a library function; apply heuristics for call similarity
 				# 2. exclusion checks		
-
-				if self._current[tid].working.addr == 0x7f33fba18fc0 and self._current[tid].function.addr == 0x7f33fba18fc0:
-					print("=== PORCODDIO ===")
-					# IPython.embed()
 
 				if  self.OS == 'Linux' and self.is_plt_plt_got(target) and self.is_plt_plt_got(rip) or \
 					self._current[tid].rsp_at_entrypoint != self._current[tid].sp or \
