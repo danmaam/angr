@@ -40,24 +40,6 @@ else:
     base_address = 0x0
 
 
-funcs = {}
-with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:
-    lines = [x.rstrip() for x in f.readlines()]
-    for l in lines:
-        func_addr, edges = l.split(':')
-
-        func_addr = int(func_addr, 16)
-        funcs[func_addr] = defaultdict(lambda: [])
-
-        for e in edges.split('|'):
-            src, dsts = e.split('->')
-            src = int(src, 16)
-            for d in dsts.split(';'):
-                dst = int(d, 16)
-                funcs[func_addr][src].append(dst)
-
-print(funcs)
-
 bytecode = os.path.join('dumps', args.test, 'bytecode.bin')
 trace = os.path.join('dumps', args.test, 'trace.json')
 avoid = os.path.join('dumps', args.test, 'avoid.bin')
@@ -71,19 +53,47 @@ a = angr.project.load_trace(bytecode, 'x86_64')
 b = a.analyses.CFGInstrace(trace, avoid, OS = args.operating_system, plt_dump = plt)
 
 
+#IPython.embed()
+
+
+
+with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:   
+    lines = [x.rstrip() for x in f.readlines()] 
+    for x in lines:
+        command, params = x.split(':')
+        match command:
+            case "FUNCTION":
+                curr_func = b.functions.function(addr=int(params, 16))
+                assert curr_func is not None
+            case "CALLSITES":
+                for callsite in params.split(','):
+                    callsite = b.model.get_node(int(callsite, 16))
+                    assert callsite is not None
+                    assert callsite.addr in curr_func._call_sites.keys(), IPython.embed()
+            case "RETSITES":
+                retsite = b.model.get_node(int(params, 16))
+                assert retsite is not None
+                assert retsite in curr_func._ret_sites
+            case "EDGES":
+                edges = [x.split('->') for x in params.split(',')]
+                for src, dst in edges:
+                    
+                    src_int = int(src, 0x10)
+                    dst_int = int(dst, 0x10)
+
+                    src_node = b.model.get_node(src_int)
+                    dst_node = b.model.get_node(dst_int)
+
+                    assert src_node is not None, f"Node with address {hex(src_int)} not found"
+                    assert dst_node is not None, f"Node with address {hex(dst_int)} not found"
+
+                    assert (src_node, dst_node) in curr_func.transition_graph.edges, f"Edge ({hex(src_int)}, {hex(dst_int)}) not found in function {hex(curr_func.addr)}"
+
+
 IPython.embed()
-
-for func, edges in funcs.items():
-    function = b.functions.function(addr=base_address + func)
-    assert function is not None
-    for src, dsts in edges.items():
-        src_node = b.model.get_node(base_address + src)
-        assert src_node is not None
-        for dst in dsts:
-            dst_node = b.model.get_node(base_address + dst)
-            assert dst_node is not None
-            assert function.transition_graph.has_edge(src_node, dst_node)
-
 print(" === TEST PASSED === ")
+                
+
+
 
             

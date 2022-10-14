@@ -170,7 +170,8 @@ class FunctionManager(KnowledgeBasePlugin, collections.abc.Mapping):
         if isinstance(retn_node, self.address_types):
             retn_node = self._kb._project.factory.snippet(retn_node)
         func = self._function_map[function_addr]
-        func._add_call_site(from_node.addr, to_addr, retn_node.addr if retn_node else None)
+            
+        func._add_call_site(from_node.addr, to_addr, retn_node.addr if retn_node is not None else None)
 
         if to_addr is not None:
             dest_func = self._function_map[to_addr]

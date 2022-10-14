@@ -4,7 +4,7 @@ import networkx
 import string
 import itertools
 from collections import defaultdict
-from typing import Union, Optional, Iterable, Set, Generator
+from typing import Tuple, Union, Optional, Iterable, Set, Generator
 from typing import Type # For some reasons the linter doesn't recognize the use in apply_definition but PyCharm needs it imported to correctly recognize it # pylint: disable=unused-import
 import pyvex
 import IPython
@@ -867,7 +867,17 @@ class Function(Serializable):
         :param call_target_addr:     The address of the target of said call.
         :param retn_addr:            The address that said call will return to.
         """
-        self._call_sites[call_site_addr] = (call_target_addr, retn_addr)
+
+        # TODO: This is a hack for the thesis, you are breaking angr.
+
+        if call_site_addr in self._call_sites.keys():
+            if isinstance(self._call_sites[call_site_addr], Tuple):
+                self._call_sites[call_site_addr] = [self._call_sites[call_site_addr], (call_target_addr, retn_addr)]
+            else:
+                self._call_sites[call_site_addr].append((call_target_addr, retn_addr))
+        else:
+            self._call_sites[call_site_addr] = (call_target_addr, retn_addr)
+
 
 
     def _split_node(self, node, car_bb, cdr_bb):

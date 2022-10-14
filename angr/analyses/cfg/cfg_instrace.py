@@ -220,7 +220,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		# end of the basic block, lift it to IRSB
 
 		#TODO: DELETE THE REPLACE WHEN UNDERSTOOD HOW TO DEAL WITH PYVEX ISSUE				
-		bytecode = self._lifting_context[tid].bytecode.replace(b"\xf3H\x0f\x1e", b"\x90\x90\x90\x90").replace(b"\xf3\x0f\x1e", b"\x90\x90\x90").replace(b"\xc8H\x89G", b"\x90" * 4)
+		bytecode = self._lifting_context[tid].bytecode.replace(b"\xf3H\x0f\x1e", b"\x90\x90\x90\x90").replace(b"\xf3\x0f\x1e", b"\x90\x90\x90").replace(b"\xc8H\x89G", b"\x90" * 4).replace(b"\x0f\xc7d$@", b"\x90" * 5)
 
 		block_head = self._lifting_context[tid].block_head
 
@@ -232,7 +232,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			irsb = pyvex.lift(bytecode, block_head, archinfo.ArchAMD64())
 
 			while (irsb.size != len(bytecode)):
-				# TODO: find a solution to pyvex not lifting each part of bytecode
 				temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
 				if temp.size == 0:
 					print("Extending with zero")
@@ -299,14 +298,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self._current[tid] = self.State()
 		self._callstack[tid] = CallStack(bottom=True)
 
-	def get_next_job(self, pre = False):
+	def get_next_job(self):
 		while True:
 			opcode = self._ins_trace.read(1)
 			if opcode:				
 				job = self._job_factory[opcode](opcode)
 				if isinstance(job, CFGJob):
 					return job
-
 			else:
 				self._should_abort = True
 				return
@@ -329,13 +327,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 	def _pre_analysis(self):
-		# TODO: handle self modifying code
-
 		self._initialize_cfg()
-
-		# TODO: process in parallel each thread
-		# First try with trace at timestamp 0 and thread 0
-		job = self.get_next_job(pre = True)
+		job = self.get_next_job()
 		self._insert_job(job)
 
 
@@ -353,7 +346,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			raise NotImplementedError(f"Operation {job.opcode} not yet implemented")
 
 
-	# TODO: check if splitting works with call in the same function
 	def process_group(self, job: CFGJob) -> None:
 
 		
@@ -382,13 +374,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					while node._irsb.jumpkind == 'Ijk_Splitted':
 
 						successors = node.successors()
+						if len(successors) != 1:
+							IPython.embed()
+							
 						assert len(successors) == 1
 
 						node = successors[0]                        
 
-
-			# TODO: differentiate between jump in middle of funciton or jump not to the first instruction \
-			# of a block
 
 			else:
 				# check if we are jumping in the middle of a block, or in the middle of
@@ -433,6 +425,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 	def split_node(self, node, split_addr, tid) -> BasicBlock :       
 		l.info(f"TID {tid}: Splitting node at " + hex(split_addr))
+
 		bytecode = lifted[node.addr]
 		offset = split_addr - node._irsb.addr
 
@@ -602,18 +595,15 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				
 				# Search for return node in model. If it doesn't exist, create a phantom one
 				assert len(self.model.get_all_nodes(addr = return_address, anyaddr = True)) <= 1
+
 				return_node = self.model.get_node(return_address)
 
 				if return_node is None:
 					return_node = BasicBlock(return_address, graph = self._current[tid].function.transition_graph, is_phantom = True)
 
 					self.model.add_node(return_address, return_node)
-
-				self._current[tid].function._transit_to(working, return_node)
 				
-				self.functions._add_call_to(self._current[tid].function.addr, working, target, \
-					return_node, ins_addr = rip
-					)    
+				self._current[tid].function._callout_sites.add(working)
 
 				l.info(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
@@ -634,34 +624,38 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			else:
 				l.debug("Ignoring call @" + hex(rip) + " since it's to a library function")
 		
-		elif jumpkind == 'Ijk_Ret' and self._callstack[tid] is not None:
+		elif jumpkind == 'Ijk_Ret' and self._callstack[tid]:
 			# TODO: find out if the edges to be addedd are necessary 
 			self._current[tid].function._add_return_site(self._current[tid].working)
 
-			l.info(f"TID {tid}: Returning to " + hex(target))
+			callee = self._current[tid].function
+
+			l.info(f"TID {tid}: Returning to {hex(target)} | Depth: {len(self._callstack[tid])}")
 
 			try:
 				if not self.should_target_be_tracked(target):
 					l.warning("Ignoring return since it's to a library function")
 					return
+				
+				stack_top = self._callstack[tid]
+				self._callstack[tid] = self._callstack[tid].pop()
 
-				(func, working_bb, stack_ptr, rsp_entry) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)
+				# restore status after return
+				assert stack_top.ret_addr == target, IPython.embed()
 
-				assert self._callstack[tid].ret_addr == target
-
+				(func, working_bb, stack_ptr, rsp_entry) = (stack_top.current.function, stack_top.current.working, stack_top.current.sp, stack_top.current.rsp_at_entrypoint)
 				# TODO: don't remember why there is this check, reintroduce it when i remember why it's there
 				# assert self._callstack[tid].stack_ptr == self._current[tid].sp, hex(self._callstack[tid].stack_ptr) + " " + hex(self._current[tid].sp)
+				self._current[tid] = self.State(function=func, working=working_bb, sp=stack_ptr, entry_rsp=rsp_entry)				
 				
-				self._callstack[tid] = self._callstack[tid].ret(target)
-				self._current[tid] = self.State(function=func, working=working_bb, sp=stack_ptr, entry_rsp=rsp_entry)
+				# it's returning, so remove the call from the callout and put it in the call list
 
-				# for debug purposes
-				# TODO: delete these lines
-				node = self.model.get_node(target)
-				assert node in self._current[tid].function.nodes
+				self._current[tid].function._callout_sites.remove(working_bb)
+				# check if it's a direct or an indirect call; if indirect, doesn't save target
+				self.functions._add_call_to(self._current[tid].function.addr, working_bb, callee.addr, \
+					self.model.get_node(target), ins_addr = rip
+					)
 				
-				
-				pass
 			except SimEmptyCallStackError:
 				l.warning("Stack empty")
 
@@ -673,11 +667,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			raise NotImplementedError("Unsupported jumpkind: " + jumpkind)
 
 
-	# TODO: handle multiple timestamps for self modifying code 
 	# From the execution trace, detects and create the next IR group to be processed
 	def _get_successors(self, job: CFGJob) -> List[CFGJob]:
 
-		
 		job = self.get_next_job()
 
 		if self.should_abort:
