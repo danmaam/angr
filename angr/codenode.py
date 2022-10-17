@@ -72,20 +72,20 @@ class CodeNode:
 class BasicBlock(CodeNode):
 	def __init__(self, addr=0, size=0, graph=None, thumb=False, irsb:pyvex.IRSB=None, instructions=None, is_phantom=False, exit_sp=None):
 		super().__init__(addr, size, graph=graph, thumb=thumb)
-		assert graph is not None
+		#assert graph is not None
 		if not is_phantom:
 			assert irsb is not None
 			if irsb is not None:
 				assert isinstance(irsb, pyvex.IRSB)
 
-				graph.add_node(self)
+				#graph.add_node(self)
 				self._irsb = irsb
 			else:
 				self._irsb = pyvex.IRSB.empty_block(archinfo.ArchAMD64(), addr = addr, jumpkind='Ijk_NoDecode')
 				
 		# TODO: check if it's necessary to add the node before adding an edge
 		# self._graph.add_node(self)
-
+		self.graph = None
 		self.is_phantom = is_phantom
 		self.prev_jump_target = {}
 		

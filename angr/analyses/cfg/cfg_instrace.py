@@ -347,9 +347,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 	def process_group(self, job: CFGJob) -> None:
-
-		
-
 		l.debug(f"TID {job.tid} processing group {hex(job.addr)}")
 		tid = job.tid
 		group : pyvex.IRSB = job.block_irsb
@@ -372,7 +369,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				else:
 					# TODO: handle self modifying code at the same address location
 					while node._irsb.jumpkind == 'Ijk_Splitted':
-
 						successors = node.successors()
 						if len(successors) != 1:
 							IPython.embed()
@@ -393,7 +389,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					# we are jumping in the middle of an instruction
 					# need to create a new node
 					l.info(f"TID {tid}: detected jump in middle of instruction at {hex(group.addr)}")
-					node = BasicBlock(group.addr, group.size, self._current[tid].function.transition_graph, irsb=group)
+					node = BasicBlock(group.addr, group.size, irsb=group)
 					self.model.add_node(node.addr, node)
 				
 
@@ -402,7 +398,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			# there isn't any node with the address of the current group
 			# just create a new node
 			#l.debug(f"Creating new Basic Block for target {hex(group.addr)}")
-			node = BasicBlock(group.addr, group.size, self._current[tid].function.transition_graph, irsb=group)
+			node = BasicBlock(group.addr, group.size, irsb=group)
 			self.model.add_node(node.addr, node)
 
 		
@@ -445,8 +441,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		car_irsb.jumpkind = 'Ijk_Splitted'
 
 		# create the new basic blocks
-		car_bb = BasicBlock(car_irsb.addr, car_irsb.size, node._graph, irsb=car_irsb)
-		cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, node._graph, irsb=cdr_irsb)
+		car_bb = BasicBlock(car_irsb.addr, car_irsb.size, irsb=car_irsb)
+		cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, irsb=cdr_irsb)
 		
 		# find functions that contains the original block
 		funcs_with_block = filter(lambda x: self._current[tid].working.addr in x._local_block_addrs, self.functions._function_map.values())
@@ -574,7 +570,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 							if not node.is_phantom and node.addr != t:
 								node = self.split_node(node, t, tid)
 						else:
-							node = BasicBlock(addr = t, graph=self._current[tid].function.transition_graph, is_phantom = True)
+							node = BasicBlock(addr = t, is_phantom = True)
 
 							self.model.add_node(t, node)
 						self._current[tid].function._transit_to(working, node)                       
@@ -599,7 +595,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				return_node = self.model.get_node(return_address)
 
 				if return_node is None:
-					return_node = BasicBlock(return_address, graph = self._current[tid].function.transition_graph, is_phantom = True)
+					return_node = BasicBlock(return_address, is_phantom = True)
 
 					self.model.add_node(return_address, return_node)
 				

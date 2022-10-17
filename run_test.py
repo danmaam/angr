@@ -71,9 +71,10 @@ with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:
                     assert callsite is not None
                     assert callsite.addr in curr_func._call_sites.keys(), IPython.embed()
             case "RETSITES":
-                retsite = b.model.get_node(int(params, 16))
-                assert retsite is not None
-                assert retsite in curr_func._ret_sites
+                for retsite in params.split(','):
+                    retsite = b.model.get_node(int(retsite, 16))
+                    assert retsite is not None
+                    assert retsite in curr_func._ret_sites
             case "EDGES":
                 edges = [x.split('->') for x in params.split(',')]
                 for src, dst in edges:
@@ -88,6 +89,13 @@ with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:
                     assert dst_node is not None, f"Node with address {hex(dst_int)} not found"
 
                     assert (src_node, dst_node) in curr_func.transition_graph.edges, f"Edge ({hex(src_int)}, {hex(dst_int)}) not found in function {hex(curr_func.addr)}"
+            case "NONRETSITES":
+                for retsite in params.split(','):
+                    retsite = b.model.get_node(int(retsite, 16))
+                    if retsite is not None:
+                        assert retsite not in curr_func._ret_sites
+
+            
 
 
 IPython.embed()
