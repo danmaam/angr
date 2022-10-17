@@ -88,7 +88,8 @@ with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:
                     assert src_node is not None, f"Node with address {hex(src_int)} not found"
                     assert dst_node is not None, f"Node with address {hex(dst_int)} not found"
 
-                    assert (src_node, dst_node) in curr_func.transition_graph.edges, f"Edge ({hex(src_int)}, {hex(dst_int)}) not found in function {hex(curr_func.addr)}"
+
+                    assert (src_node, dst_node) in curr_func.transition_graph.edges, IPython.embed()
             case "NONRETSITES":
                 for retsite in params.split(','):
                     retsite = b.model.get_node(int(retsite, 16))

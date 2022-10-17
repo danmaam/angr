@@ -13,9 +13,11 @@ import collections
 from copy import copy
 import sys
 from matplotlib.pyplot import pause
+import ipdb
 
-# LAST BASE: 0x7ff6153c0000
-
+# TODO: Save nodes in function and non in general CFGModel
+# TODO: Check how to get nodes from function graph
+# TODO: add callgraph in general CFGModel
 
 from sympy import Q, false, true
 import angr
@@ -189,7 +191,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			else:
 				self.process_type(self._current[tid].working.prev_jump_target[tid], job)    
 
-			self.process_group(job)
+			self.process_group(job) 
 
 
 
@@ -422,6 +424,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def split_node(self, node, split_addr, tid) -> BasicBlock :       
 		l.info(f"TID {tid}: Splitting node at " + hex(split_addr))
 
+
 		bytecode = lifted[node.addr]
 		offset = split_addr - node._irsb.addr
 
@@ -478,6 +481,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		working : BasicBlock = self._current[tid].working
 		jumpkind = working._irsb.jumpkind
 		rip = working._irsb.instruction_addresses[-1]
+
 
 
 		# get all the possible jump targets from the current block
@@ -571,7 +575,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 								node = self.split_node(node, t, tid)
 						else:
 							node = BasicBlock(addr = t, is_phantom = True)
-
 							self.model.add_node(t, node)
 						self._current[tid].function._transit_to(working, node)                       
 
