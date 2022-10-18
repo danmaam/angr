@@ -36,7 +36,4 @@ Scripts/
 pyvenv.cfg
 share/
 .DS_Store
-bytecode.bin
-trace.json
-avoid.bin
 *.elf
