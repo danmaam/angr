@@ -61,18 +61,26 @@ lifted = {}
 
 splitted = set()
 class CFGJob():
-	def __init__(self, opcode, destination: int, tid : int, addr : int):
+	def __init__(self, destination: int, tid : int, addr : int, process):
 		
 		self.destination = destination
 		self.tid = tid
-		self.opcode = opcode
 		self.addr = addr
+		self.process = process
+		
+	
+
+class InstructionJob(CFGJob):
+	def __init__(self, destination: int, tid: int, addr: int, process, sp: int):
+		super().__init__(destination, tid, addr, process)
+		self.sp = sp
+
 	
 
 class BasicBlockJob(CFGJob):
-	def __init__(self, opcode, destination: int, tid: int, addr: int, start_sp: int = None, \
+	def __init__(self, destination: int, tid: int, addr: int, process, start_sp: int = None, \
 				 exit_sp=None, block_irsb: pyvex.IRSB = None):
-		super().__init__(opcode, destination, tid, addr)
+		super().__init__(destination, tid, addr, process)
 	
 		self.block_irsb = block_irsb 
 
@@ -123,7 +131,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				size = struct.unpack('<q', c[8:])[0]
 				self.avoided_addresses[addr] = addr + size
 
-
+	
 	def __init__(self, trace, to_avoid_functions, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None, OS = 'Linux', plt_dump = None):
 		ForwardAnalysis.__init__(self, allow_merging=False)
 		CFGBase.__init__(
@@ -148,8 +156,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self.lift_cache = defaultdict(lambda: None)
 		self.pruned_jumps = set()       
 		self.OS = OS 
-
-		self._internal_job_queue = []
 	
 
 		self._ins_trace = open(trace, "rb")	
@@ -172,13 +178,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self.load_libraries(to_avoid_functions)
 
 
-		self._job_dispatcher = {b"\x01": self.process_basic_block_job, b"\x02": self.process_raised_signal, b"\x03": self.process_return_from_signal}
+		self._job_dispatcher = {b"\x01": self.ProcessNewBasicBlock, b"\x02": self.process_raised_signal, b"\x03": self.process_return_from_signal}
 
 		self._job_factory = {
-			b"\x00": self.OP_new_instruction,
-			b"\x01": self.OP_new_basic_block,
-			b"\x02": self.OP_raise_signal,
-			b"\x03": self.OP_return_signal
+			b"\x00": self.OPNewInstruction,
+			b"\x01": self.OPNewBasicBlock
 		}
 
 		self._state_stack = defaultdict(lambda: [])
@@ -188,7 +192,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 
-	def process_basic_block_job(self, job: CFGJob):
+	def ProcessNewBasicBlock(self, job: CFGJob):
 		tid = job.tid
 
 		if self.should_target_be_tracked(job.addr):
@@ -205,10 +209,63 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def is_plt_plt_got(self, target):
 		return any(target >= start and target < end for start, end in self.plt_sections)
 
+	
+	def NewInstruction(self, job: InstructionJob):
+		return
 
-	def OP_new_instruction(self, opcode):
+	def LiftBasicBlock(self, exitRSP, tid, destination=None):
+		NOT_CONSIDERED_1 = b"\xf3H\x0f\x1e"
 
-		curr_chunk = curr_chunk = self._ins_trace.read(20)
+		head = self._lifting_context[tid].block_head
+
+
+		#TODO: DELETE THE REPLACE WHEN UNDERSTOOD HOW TO DEAL WITH PYVEX ISSUE				
+		bytecode = self._lifting_context[tid].bytecode
+
+		bytecode = bytecode.replace(NOT_CONSIDERED_1, b"\x90" * 4).replace(b"\xc8H\x89G", b"\x90" * 4).replace(b"\x0f\xc7d$@", b"\x90" * 5)
+		size = len(bytecode)
+
+		# Take the block from the lifting cache
+		irsb = self.lift_cache[head]	
+
+		if not irsb:						
+			irsb = pyvex.lift(bytecode, head, archinfo.ArchAMD64())
+
+			# Hack to deal with pyvex bug on rep instructions
+			while (irsb.size != size):
+				temp = pyvex.lift(bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
+
+				# Check that pyvex effectively lifted code
+				if temp.size == 0:
+					l.error(f"TID {tid}: Error while lifting with pyvex")
+					exit(-1)
+
+				irsb.extend(temp)
+					
+			# Save the lifted block in the lift cache
+			self.lift_cache[head] = irsb
+
+		# Clear the lift context for the current thread
+
+		next_ip = destination if destination is not None else irsb.next.constants[0].value
+
+		# We set the entry rsp of the block only if it's the first block
+		entryRSP = self._lifting_context[tid].start_rsp
+
+		if l.level <= logging.DEBUG:
+			if self.should_target_be_tracked(head):
+				self.disasm(bytecode, head)
+				pass
+
+		# TODO: allow relifting without saving twice the bytecode
+		lifted[head] = bytecode 
+		self._lifting_context[tid] = self.LiftingContext()
+
+		return [BasicBlockJob(next_ip, tid, head, self.ProcessNewBasicBlock , block_irsb = irsb, start_sp = entryRSP, exit_sp = exitRSP)]
+
+	def OPNewInstruction(self, check = True):
+
+		curr_chunk = self._ins_trace.read(20)
 		ip = struct.unpack('<Q', curr_chunk[:8])[0]
 		sp = struct.unpack('<Q', curr_chunk[8:16])[0]
 		tid =  struct.unpack('<I', curr_chunk[16:20])[0]
@@ -218,87 +275,24 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		
 		self._lifting_context[tid].bytecode += self.project.loader._instruction_map[ip]
 
-		return (sp, tid)
-
-
-	def OP_new_basic_block(self, opcode):
-
-		NOT_CONSIDERED_1 = b"\xf3H\x0f\x1e"
-
-		(exit_sp, tid) = self.OP_new_instruction(opcode)
-
-		dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
-		# end of the basic block, lift it to IRSB
+		# Check if we covered part of a block or not
+		size = len(self._lifting_context[tid].bytecode)
 		head = self._lifting_context[tid].block_head
 
-		#TODO: DELETE THE REPLACE WHEN UNDERSTOOD HOW TO DEAL WITH PYVEX ISSUE				
-		bytecode = self._lifting_context[tid].bytecode
+		if check and head + size in self.model._nodes_by_addr:
+			return self.LiftBasicBlock(sp, tid)
 
-		bytecode = bytecode.replace(NOT_CONSIDERED_1, b"\x90" * 4).replace(b"\xc8H\x89G", b"\x90" * 4).replace(b"\x0f\xc7d$@", b"\x90" * 5)
-
-
-		size = len(bytecode)
+		return [InstructionJob(0, tid, ip, self.NewInstruction, sp)]
 
 
-		#if head == 0x7f41d1f2a543:
-		#	ipdb.set_trace()
+	def OPNewBasicBlock(self):
 
-		# check if this basic blocks is a single block, or it's composed by multiple basic blocks (e.g. previous split)
-		chunks = sorted(list(map(lambda x: x - head,  [head] + list(map(lambda x: x[0].addr, filter(lambda x: head < x[0].addr and x[0].addr < head + size, self.model._nodes_by_addr.values()))))) + [len(bytecode)])
+		job = self.OPNewInstruction(check = False)[0]
+		(tid, exitRSP) = (job.tid, job.sp)
 
-		chunks = [(chunks[i], chunks[i+1]) for i, _ in enumerate(chunks[:-1]) ]
+		destination = struct.unpack('<Q', self._ins_trace.read(8))[0]
+		return self.LiftBasicBlock(exitRSP, tid, destination)
 
-		jobs = []
-
-
-		for chunk in chunks:
-			curr_head = head + chunk[0]
-			curr_bytecode = bytecode[chunk[0]:chunk[1]]
-
-			# Take the block from the lifting cache
-			irsb = self.lift_cache[curr_head]	
-
-			if not irsb:						
-				irsb = pyvex.lift(curr_bytecode, curr_head, archinfo.ArchAMD64())
-
-				# Hack to deal with pyvex bug on rep instructions
-				while (irsb.size != len(curr_bytecode)):
-					temp = pyvex.lift(curr_bytecode[irsb.size:], irsb.addr + irsb.size, archinfo.ArchAMD64())
-
-					# Check that pyvex effectively lifted code
-					if temp.size == 0:
-						l.error(f"TID {tid}: Error while lifting with pyvex")
-						exit(-1)
-
-					irsb.extend(temp)
-						
-				# Save the lifted block in the lift cache
-				self.lift_cache[curr_head] = irsb
-
-			# Clear the lift context for the current thread
-			next_ip = dst if chunk == chunks[-1] else irsb.next.constants[0].value if isinstance(irsb.next, pyvex.expr.Const) else irsb.next.addr
-
-
-			# We set the entry rsp of the block only if it's the first block
-			job_entry_sp = self._lifting_context[tid].start_rsp if chunk == chunks[0] else None
-			# We set the exit_sp of the block only if it's the last block
-			job_exit_sp = exit_sp if chunk == chunks[-1] else None
-
-			if l.level <= logging.DEBUG:
-				if self.should_target_be_tracked(curr_head):
-					self.disasm(curr_bytecode, curr_head)
-					pass
-
-			# TODO: allow relifting without saving twice the bytecode
-			lifted[curr_head] = curr_bytecode 
-
-			new_job = BasicBlockJob(opcode, next_ip, tid, curr_head, block_irsb = irsb, start_sp = job_entry_sp, exit_sp = job_exit_sp)
-
-			jobs.append(new_job)
-
-		self._lifting_context[tid] = self.LiftingContext()
-
-		return jobs
 
 	def OP_raise_signal(self, opcode):
 		chunk = self._ins_trace.read(21)
@@ -343,9 +337,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		while True:
 			opcode = self._ins_trace.read(1)
 			if opcode:				
-				job = self._job_factory[opcode](opcode)
-				if isinstance(job, list):
-					return job
+				job = self._job_factory[opcode]()
+				return job
 			else:
 				self._should_abort = True
 				return
@@ -382,7 +375,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 	def _pre_job_handling(self, job: CFGJob) -> None:
 		try:
-			self._job_dispatcher[job.opcode](job)
+			job.process(job)
 		except KeyError:
 			raise NotImplementedError(f"Operation {job.opcode} not yet implemented")
 
@@ -392,6 +385,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		tid = job.tid
 		group : pyvex.IRSB = job.block_irsb
 		working : BasicBlock = self._current[tid].working
+
+		if group.addr == 0x7fc64af208f9 and group.size == 10:
+			ipdb.set_trace()
 
 		if working is None:
 			self._current[tid].rsp_at_entrypoint = job.start_sp
@@ -407,6 +403,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				# the node is a phantom one and must be converted to a non phantom
 				if node.is_phantom:
 					node.phantom_to_node(group)
+				elif node.size != group.size:
+					ipdb.set_trace()
+					(node, _) = self.split_node(node, group.addr + group.size, tid) 
 
 			else:
 				# check if we are jumping in the middle of a block, or in the middle of
@@ -414,7 +413,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 				if group.addr in node._irsb.instruction_addresses:
 					# Jumping to an instruction in the middle of the block. Split it.
-					node = self.split_node(node, group.addr, tid)
+					(_, node) = self.split_node(node, group.addr, tid)
 				else:
 					# Jumping into the middle of an instruction. Create a new node.
 					l.info(f"TID {tid}: detected jump in middle of instruction at {hex(group.addr)}")
@@ -495,7 +494,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		splitted.add(car_bb.addr)
 		splitted.add(cdr_bb.addr)
 
-		return cdr_bb
+		return (car_bb, cdr_bb)
 	
 	def should_target_be_tracked(self, target):
 		for (x,y) in self.avoided_addresses.items():
@@ -504,14 +503,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		return True
 
 	def process_type(self, target, job):
-		
 		tid = job.tid
 		l.debug(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
 		
 		working : BasicBlock = self._current[tid].working
 		jumpkind = working._irsb.jumpkind
 		rip = working._irsb.instruction_addresses[-1]
-
 
 
 		# get all the possible jump targets from the current block
@@ -604,10 +601,14 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 						if node is not None:
 							assert isinstance(node, BasicBlock)
 							if not node.is_phantom and node.addr != t:
-								node = self.split_node(node, t, tid)
+								(_, node) = self.split_node(node, t, tid)
 						else:
 							node = BasicBlock(addr = t, is_phantom = True)
 							self.model.add_node(t, node)
+
+							to_invalid = [x for x in self.lift_cache.values() if x.addr <= t and t < x.addr + x.size]
+							for i in to_invalid:
+								del self.lift_cache[i.addr]
 						self._current[tid].function._transit_to(working, node)                       
 
 		elif jumpkind == 'Ijk_Splitted':
@@ -618,9 +619,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		elif jumpkind == 'Ijk_Call': 
 			# Check if it's a call to a library function
 
-			if target == 
-
 			return_address = working.addr + working.size
+
+
 
 			if self.should_target_be_tracked(target):
 
@@ -655,8 +656,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		
 		elif jumpkind == 'Ijk_Ret' and self._callstack[tid]:
 			# TODO: find out if the edges to be addedd are necessary 
-			# if working.addr == 0x7f41d1f11efa:
-			# 	ipdb.set_trace()
+
 			self._current[tid].function._add_return_site(self._current[tid].working)
 
 			callee = self._current[tid].function
@@ -707,15 +707,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 	# From the execution trace, detects and create the next IR group to be processed
 	def _get_successors(self, job: CFGJob) -> List[CFGJob]:
-		l.debug(f"TID {job.tid}: Getting new jobs")
+		job = self.get_next_job()
 
-		if len(self._internal_job_queue) == 0:
-			self._internal_job_queue = self.get_next_job()
-
-			if self.should_abort:
-				return []
-			
-		return [self._internal_job_queue.pop(0)]
+		if self.should_abort:
+			return []
+		
+		return job
 		
 
 	# it isn't necessary to implement a post job handler
