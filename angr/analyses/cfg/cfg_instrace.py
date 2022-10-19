@@ -56,9 +56,6 @@ l.setLevel(logging.getLevelName('DEBUG'))
 '''
 
 
-# TODO: TI PREGO TROVA UN MODO MIGLIORE DI FARE IL BLOCK SPLIT FA SCHIFO
-lifted = {}
-
 splitted = set()
 class CFGJob():
 	def __init__(self, destination: int, tid : int, addr : int, process):
@@ -150,6 +147,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			model=model,
 		)
 
+
 		self._callstack = defaultdict(lambda: None)
 		self._current = defaultdict(lambda: self.State(function = None, working = None, sp = None))
 		self._lifting_context = defaultdict(lambda: self.LiftingContext())
@@ -157,6 +155,14 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self.pruned_jumps = set()       
 		self.OS = OS 
 	
+
+		# TODO: this is a really awful hack. plz fix this
+		for key, val in self.project.loader._instruction_map.items():
+			try:
+				self.project.loader.memory.add_backer(key, val)
+			except:
+				self.project.loader.memory.store(key, val)
+
 
 		self._ins_trace = open(trace, "rb")	
 		
@@ -257,8 +263,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				self.disasm(bytecode, head)
 				pass
 
-		# TODO: allow relifting without saving twice the bytecode
-		lifted[head] = bytecode 
 		self._lifting_context[tid] = self.LiftingContext()
 
 		return [BasicBlockJob(next_ip, tid, head, self.ProcessNewBasicBlock , block_irsb = irsb, start_sp = entryRSP, exit_sp = exitRSP)]
@@ -386,8 +390,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		group : pyvex.IRSB = job.block_irsb
 		working : BasicBlock = self._current[tid].working
 
-		if group.addr == 0x7fc64af208f9 and group.size == 10:
-			ipdb.set_trace()
 
 		if working is None:
 			self._current[tid].rsp_at_entrypoint = job.start_sp
@@ -404,7 +406,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				if node.is_phantom:
 					node.phantom_to_node(group)
 				elif node.size != group.size:
-					ipdb.set_trace()
 					(node, _) = self.split_node(node, group.addr + group.size, tid) 
 
 			else:
@@ -447,8 +448,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def split_node(self, node, split_addr, tid) -> BasicBlock :       
 		l.info(f"TID {tid}: Splitting node at " + hex(split_addr))
 
-
-		bytecode = lifted[node.addr]
+		print(self.project.loader.memory)
+		bytecode = self.project.loader.memory.load(node.addr, node.size)
 		offset = split_addr - node._irsb.addr
 
 		car_bytecode = bytecode[:offset]
@@ -476,10 +477,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		for func in funcs_with_block:
 			func._split_node(node, car_bb, cdr_bb)
 		
-
-		# update the lifted bytecode
-		lifted[node._irsb.addr] = car_bytecode
-		lifted[split_addr] = cdr_bytecode
 
 		# clear the lift cache
 		self.lift_cache[node.addr] = None
