@@ -15,11 +15,35 @@ class DynamicRecoveredInstructions(Backend):
 	dynamic execution of the binary (e.g. Intel PIN, Valgrind)
 	"""
 
+	class Memory:
+		def __init__(self):
+			self.map = {}
+			self.instruction_size = {}
+		
+		def store_instruction(self, address, instruction):
+			self.instruction_size[address] = len(instruction)
+			self.store(address, instruction)
+
+		def store(self, address, data):
+			for i in range(len(data)):
+				self.map[address + i] = data[i]
+
+		def load(self, address, len):
+			data = b""
+			for i in range(len):
+				data += (self.map[address + i]).to_bytes(1, 'big')
+			return data
+
+		def load_instruction(self, address):
+			return self.load(address, self.instruction_size[address])
+
+
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		#TODO: determine instruction size from opcode
 		#load into memory 
-		self.loader._instruction_map = defaultdict(dict)
+		self.loader.instruction_memory = self.Memory()
+		self.loader.instruction_size = {}
 		"""
 		FILE FORMAT
 		[INSTRUCTION ADDRESS][INSTRUCTION SIZE][INSTRUCTION BYTECODE]
@@ -34,18 +58,13 @@ class DynamicRecoveredInstructions(Backend):
 			
 			bytecode = self._binary_stream.read(size)
 
-			# try:
-			# 	self.loader.memory.add_backer(insaddr, bytecode)
-			# except:
-			# 	self.loader.memory.store(insaddr, bytecode)
-
 			self._add_instruction(insaddr, bytecode)
 
 	def _add_instruction(self, instruction_address, bytecode):
 		"""
 		Adds a bytecode instruction to the Clememory of the project
 		"""
-		self.loader._instruction_map[instruction_address] = bytecode
+		self.loader.instruction_memory.store_instruction(instruction_address, bytecode)
 
 register_backend("dyninstruction", DynamicRecoveredInstructions)
 

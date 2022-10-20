@@ -154,14 +154,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self.lift_cache = defaultdict(lambda: None)
 		self.pruned_jumps = set()       
 		self.OS = OS 
-	
-
-		# TODO: this is a really awful hack. plz fix this
-		for key, val in self.project.loader._instruction_map.items():
-			try:
-				self.project.loader.memory.add_backer(key, val)
-			except:
-				self.project.loader.memory.store(key, val)
+				
 
 
 		self._ins_trace = open(trace, "rb")	
@@ -255,7 +248,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		# Clear the lift context for the current thread
 
-		next_ip = destination if destination is not None else irsb.next.constants[0].value
+		try:
+			next_ip = destination if destination is not None else irsb.next.constants[0].value
+		except:
+			ipdb.set_trace()
+
 
 		# We set the entry rsp of the block only if it's the first block
 		entryRSP = self._lifting_context[tid].start_rsp
@@ -279,7 +276,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self._lifting_context[tid].start_rsp = sp if self._lifting_context[tid].start_rsp is None else self._lifting_context[tid].start_rsp
 		self._lifting_context[tid].block_head = ip if self._lifting_context[tid].block_head is None else self._lifting_context[tid].block_head
 		
-		self._lifting_context[tid].bytecode += self.project.loader._instruction_map[ip]
+		self._lifting_context[tid].bytecode += self.project.loader.instruction_memory.load_instruction(ip)
 
 		# Check if we covered part of a block or not
 		size = len(self._lifting_context[tid].bytecode)
@@ -450,7 +447,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def split_node(self, node, split_addr, tid) -> BasicBlock :       
 		l.info(f"TID {tid}: Splitting node at " + hex(split_addr))
 
-		bytecode = self.project.loader.memory.load(node.addr, node.size)
+		bytecode = self.project.loader.instruction_memory.load(node.addr, node.size)
 		offset = split_addr - node._irsb.addr
 
 		car_bytecode = bytecode[:offset]
@@ -465,8 +462,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		cdr_irsb = pyvex.lift(cdr_bytecode, split_addr, archinfo.ArchAMD64())
 
 		# set the jumpkind and the next field of the first IRSB
-		car_irsb.next = cdr_irsb
-		car_irsb.jumpkind = 'Ijk_Splitted'
+		# car_irsb.next = cdr_irsb
+		# car_irsb.jumpkind = 'Ijk_Splitted'
 
 		# create the new basic blocks
 		car_bb = BasicBlock(car_irsb.addr, car_irsb.size, irsb=car_irsb)
