@@ -3,7 +3,7 @@ import logging
 from typing import List
 import pyvex
 import archinfo
-import IPython
+import ipdb
 
 l = logging.getLogger(name=__name__)
 
@@ -19,6 +19,7 @@ class CodeNode:
 	__slots__ = ['addr', 'size', '_graph', 'thumb', '_hash']
 
 	def __init__(self, addr, size, graph=None, thumb=False):
+
 		self.addr = addr
 		self.size = size
 		self.thumb = thumb

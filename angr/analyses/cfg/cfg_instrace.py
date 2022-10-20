@@ -390,7 +390,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		group : pyvex.IRSB = job.block_irsb
 		working : BasicBlock = self._current[tid].working
 
-
 		if working is None:
 			self._current[tid].rsp_at_entrypoint = job.start_sp
 
@@ -414,7 +413,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				# an instruction
 				if group.addr in node._irsb.instruction_addresses:
 					# Jumping to an instruction in the middle of the block. Split it.
-					(_, node) = self.split_node(node, group.addr, tid)
+					(car_bb, cdr_bb) = self.split_node(node, group.addr, tid)
+					node = cdr_bb
+					if working is not None and working.addr == car_bb.addr:
+						working = car_bb
 				else:
 					# Jumping into the middle of an instruction. Create a new node.
 					l.info(f"TID {tid}: detected jump in middle of instruction at {hex(group.addr)}")
@@ -470,7 +472,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		
 		# find functions that contains the original block
 		funcs_with_block = filter(lambda x: node.addr in x._local_block_addrs, self.functions._function_map.values())
-		
+
 		for func in funcs_with_block:
 			func._split_node(node, car_bb, cdr_bb)
 
