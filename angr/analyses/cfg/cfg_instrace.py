@@ -48,7 +48,7 @@ import IPython
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('DEBUG'))
+l.setLevel(logging.getLevelName('WARNING'))
 
 '''
 0x7f41d1f21bd3
@@ -85,8 +85,8 @@ class BasicBlockJob(CFGJob):
 		self.exit_sp = exit_sp
 
 class SignalJob(CFGJob):
-	def __init__(self, opcode, destination: int, tid: int, addr : int = None, signal_id : int = None):
-		super().__init__(opcode, destination, tid, addr)
+	def __init__(self, destination: int, tid: int, addr : int, process, signal_id : int = None):
+		super().__init__(destination, tid, addr, process)
 		self.signal_id = signal_id
 
 
@@ -188,7 +188,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		self._job_factory = {
 			b"\x00": self.OPNewInstruction,
-			b"\x01": self.OPNewBasicBlock
+			b"\x01": self.OPNewBasicBlock,
+			b"\x02": self.OP_raise_signal,
+			b"\x03": self.OP_return_signal
 		}
 
 		self._state_stack = defaultdict(lambda: [])
@@ -306,7 +308,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		target = struct.unpack("<Q", chunk [9:17])[0]
 		tid = struct.unpack("<I", chunk[17:21])[0]		
 
-		return [SignalJob(opcode, destination=target, tid=tid, signal_id=sig_id)]
+		return [SignalJob(target, tid, self.process_raised_signal, signal_id=sig_id)]
 
 	def OP_return_signal(self, opcode):
 		chunk = self._ins_trace.read(12)
@@ -315,7 +317,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		tid = struct.unpack("<I", chunk [8:12])[0]
 
 
-		return [SignalJob(opcode, destination=target, tid=tid)]			
+		return [SignalJob(target, tid, None, self.process_return_from_signal )]			
 	
 	def process_return_from_signal(self, job: SignalJob):		
 		tid = job.tid
@@ -448,7 +450,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def split_node(self, node, split_addr, tid) -> BasicBlock :       
 		l.info(f"TID {tid}: Splitting node at " + hex(split_addr))
 
-		print(self.project.loader.memory)
 		bytecode = self.project.loader.memory.load(node.addr, node.size)
 		offset = split_addr - node._irsb.addr
 
