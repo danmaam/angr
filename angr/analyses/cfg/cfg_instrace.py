@@ -117,7 +117,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			self.block_head = None
 
 
-
 	# Load the set of instructions that shouldn't be tracked
 	def load_libraries(self, x):
 		with open(x, "rb") as f:
@@ -238,8 +237,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 				# Check that pyvex effectively lifted code
 				if temp.size == 0:
-					l.error(f"TID {tid}: Error while lifting with pyvex")
-					exit(-1)
+					# We have to nop the instruction causing problems
+					md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+					disassembled = md.disasm(bytecode[irsb.size:], irsb.addr + irsb.size)
+					bad_instr_size = next(disassembled).size
+					bytecode = bytecode[:irsb.size] + b"\x90" * bad_instr_size + bytecode[irsb.size + bad_instr_size:]
 
 				irsb.extend(temp)
 					
@@ -297,7 +299,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		return self.LiftBasicBlock(exitRSP, tid, destination)
 
 
-	def OP_raise_signal(self, opcode):
+	def OP_raise_signal(self):
 		chunk = self._ins_trace.read(21)
 		
 		sig_id = struct.unpack("<B", chunk[0:1])[0]
@@ -305,16 +307,16 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		target = struct.unpack("<Q", chunk [9:17])[0]
 		tid = struct.unpack("<I", chunk[17:21])[0]		
 
-		return [SignalJob(target, tid, self.process_raised_signal, signal_id=sig_id)]
+		return [SignalJob(target, tid, None, self.process_raised_signal, signal_id=sig_id)]
 
-	def OP_return_signal(self, opcode):
+	def OP_return_signal(self):
 		chunk = self._ins_trace.read(12)
 		
 		target = struct.unpack("<Q", chunk[0:8])[0]
 		tid = struct.unpack("<I", chunk [8:12])[0]
 
 
-		return [SignalJob(target, tid, None, self.process_return_from_signal )]			
+		return [SignalJob(target, tid, None, self.process_return_from_signal)]			
 	
 	def process_return_from_signal(self, job: SignalJob):		
 		tid = job.tid
