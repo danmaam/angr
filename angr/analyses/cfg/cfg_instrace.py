@@ -214,15 +214,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		return
 
 	def LiftBasicBlock(self, exitRSP, tid, destination=None):
-		NOT_CONSIDERED_1 = b"\xf3H\x0f\x1e"
-
 		head = self._lifting_context[tid].block_head
-
-
-		#TODO: DELETE THE REPLACE WHEN UNDERSTOOD HOW TO DEAL WITH PYVEX ISSUE				
 		bytecode = self._lifting_context[tid].bytecode
-
-		bytecode = bytecode.replace(NOT_CONSIDERED_1, b"\x90" * 4).replace(b"\xc8H\x89G", b"\x90" * 4).replace(b"\x0f\xc7d$@", b"\x90" * 5)
 		size = len(bytecode)
 
 		# Take the block from the lifting cache
@@ -240,7 +233,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					# We have to nop the instruction causing problems
 					md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
 					disassembled = md.disasm(bytecode[irsb.size:], irsb.addr + irsb.size)
-					bad_instr_size = next(disassembled).size
+					i = next(disassembled)
+					l.warning(f"{hex(i.address)}, {i.mnemonic}, {i.op_str} replaced with Nop Instructions")
+					l.warning(f"Bytecode: {bytecode[irsb.size:]}")
+					bad_instr_size = i.size
 					bytecode = bytecode[:irsb.size] + b"\x90" * bad_instr_size + bytecode[irsb.size + bad_instr_size:]
 
 				irsb.extend(temp)
