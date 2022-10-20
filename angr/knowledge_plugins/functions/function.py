@@ -883,7 +883,7 @@ class Function(Serializable):
     def _split_node(self, node, car_bb, cdr_bb):
         
 
-        assert node.addr in self.block_addrs_set, IPython.embed()       
+        assert node.addr in self._local_block_addrs, IPython.embed()       
 
         node_successors = list(map(lambda x: x[1], filter(lambda x: node.addr == x[0].addr, self.transition_graph.edges)))
         node_predecessors = list(map(lambda x: x[0], filter(lambda x: node.addr == x[1].addr, self.transition_graph.edges)))

@@ -44,16 +44,11 @@ import json
 import pyvex
 import archinfo
 
-import IPython
-
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('DEBUG'))
+l.setLevel(logging.getLevelName('WARNING'))
 
-'''
-0x7f41d1f21bd3
-0x7f41d1f21be3
-'''
+
 
 
 splitted = set()
@@ -386,14 +381,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		l.debug("Job queue is empty. Stopping.")
 
 	def _pre_job_handling(self, job: CFGJob) -> None:
-		try:
-			job.process(job)
-		except KeyError:
-			raise NotImplementedError(f"Operation {job.opcode} not yet implemented")
+		job.process(job)
 
 
 	def process_group(self, job: CFGJob) -> None:
-		l.debug(f"TID {job.tid} processing group {hex(job.addr)}")
+		l.debug(f"TID {job.tid} processing group {hex(job.addr)} in function {hex(self._current[job.tid].function.addr)}")
 		tid = job.tid
 		group : pyvex.IRSB = job.block_irsb
 		working : BasicBlock = self._current[tid].working
@@ -424,7 +416,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			else:
 				# check if we are jumping in the middle of a block, or in the middle of
 				# an instruction
-
 				if group.addr in node._irsb.instruction_addresses:
 					# Jumping to an instruction in the middle of the block. Split it.
 					(_, node) = self.split_node(node, group.addr, tid)
@@ -445,6 +436,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		if working is not None:
 			self._current[tid].function._transit_to(working, node)
+		else:
+			self._current[tid].function._register_nodes(True, node)
 
 		self._current[tid].working = node
 		self._current[tid].working.prev_jump_target[tid] = job.destination
@@ -480,7 +473,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, irsb=cdr_irsb)
 		
 		# find functions that contains the original block
-		funcs_with_block = filter(lambda x: self._current[tid].working.addr in x._local_block_addrs, self.functions._function_map.values())
+		funcs_with_block = filter(lambda x: node in x._local_block_addrs, self.functions._function_map.values())
 		
 		for func in funcs_with_block:
 			func._split_node(node, car_bb, cdr_bb)
@@ -505,7 +498,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			if x <= target and target < y:
 				return False
 		return True
-
+		
 	def process_type(self, target, tid):
 		l.debug(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
 		
@@ -519,11 +512,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		jump_targets.add(target)
 		jump_targets = set(filter(lambda x: not (working.addr <= x and x < working.addr + working.size), jump_targets))
 
-
-
 		assert len(jump_targets) <= 2
-
-	
 
 		if jumpkind == 'Ijk_Boring':
 			# herustic checks for call similarity
@@ -531,20 +520,16 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			# 1. pruned jump check
 			if rip not in self.pruned_jumps:
 				
-
 				# check in before we are in a jmp stub 
 				# since library function are not tracked, we need to fix the callstack
 				if len(jump_targets) == 1 and not self.should_target_be_tracked(target): 
 
-
 					self._current[tid].function.add_jumpout_site(self._current[tid].working)
-
 
 					# get stub function from call stack and pop the callstack
 					(caller, working_bb, ret_addr, exit_sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)					
 
 					self._callstack[tid] = self._callstack[tid].pop()
-
 
 					# add a fake return from the stub to the caller of the stub
 					self._current[tid].function._fakeret_to(self._current[tid].working, caller)
@@ -555,7 +540,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					l.info(f"TID {tid}: Jump stub, returning to {hex(ret_addr)}")
 					l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
 					return
-
 
 				# it's not a call to a library function; apply heuristics for call similarity
 				# 2. exclusion checks		
@@ -569,7 +553,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					is_jump = True
 
 				else:            
-
 					# inclusion checks
 					# TODO: make the check with filter better
 					if  self.functions.function(addr=target) or \
@@ -577,7 +560,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 						len(list(filter(lambda x: self._current[tid].working.addr in x._local_block_addrs, self.functions._function_map.values()))) == 1 and \
 						any(rip <= func and func <= target for func in self.functions._function_map.keys()):
 
-						
 						l.info(f"TID {tid}: @{hex(rip)} Detected a call with call similarity heuristics with dst {hex(target)}")
 						# Heuristics show it's a call. Fix the current function with the effectively called
 						# without pushing anything on the callstack
@@ -621,21 +603,21 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			node = self.model.get_node(working._irsb.next.addr)
 			self._current[tid].function._transit_to(working, node)
 
+		elif jumpkind == "Ijk_Yield":
+			pass
+
 		
 		elif jumpkind == 'Ijk_Call': 
 			# Check if it's a call to a library function
 
 			return_address = working.addr + working.size
 
-
-
 			if self.should_target_be_tracked(target):
 
 				# Register the call site in the current function            
 				called = self.functions.function(target, create = True)
 
-				# Try to calculate the return from the call, so that it's possible to create the phantom node
-				
+				# Try to calculate the return from the call, so that it's possible to create the phantom node				
 				# Search for return node in model. If it doesn't exist, create a phantom one
 				assert len(self.model.get_all_nodes(addr = return_address, anyaddr = True)) <= 1
 
@@ -650,9 +632,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				l.info(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
 
 				self._callstack[tid] = self._callstack[tid].call(rip, target, retn_target=return_address,
-								current=self._current[tid])
-
-				
+								current=self._current[tid])				
 				
 				self._current[tid] = self.State(function=called, working=None)
 				assert self._current[tid].function.addr == target
@@ -687,17 +667,20 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				self._current[tid] = self.State(function=func, \
 												working=working_bb, \
 												sp=stack_ptr, \
-												entry_rsp=rsp_entry)				
-				
+												entry_rsp=rsp_entry)
+				assert self._current[tid].working.addr in self._current[tid].function.block_addrs_set
 				# it's returning, so remove the call from the callout and put it in the call list
-
-				self._current[tid].function._callout_sites.remove(working_bb)
+				try:
+					self._current[tid].function._callout_sites.remove(working_bb)
+				except:
+					pass
 				# check if it's a direct or an indirect call; if indirect, doesn't save target
 				self.functions._add_call_to(self._current[tid].function.addr, 	
 											working_bb, \
 											callee.addr, \
 											self.model.get_node(target), ins_addr = rip
 											)
+						
 
 			
 			except SimEmptyCallStackError:
