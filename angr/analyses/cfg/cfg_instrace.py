@@ -473,7 +473,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		cdr_bb = BasicBlock(cdr_irsb.addr, cdr_irsb.size, irsb=cdr_irsb)
 		
 		# find functions that contains the original block
-		funcs_with_block = filter(lambda x: node in x._local_block_addrs, self.functions._function_map.values())
+		funcs_with_block = filter(lambda x: node.addr in x._local_block_addrs, self.functions._function_map.values())
 		
 		for func in funcs_with_block:
 			func._split_node(node, car_bb, cdr_bb)
