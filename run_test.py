@@ -64,7 +64,7 @@ with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:
         match command:
             case "FUNCTION":
                 curr_func = b.functions.function(addr=int(params, 16))
-                assert curr_func is not None
+                assert curr_func is not None, f"{hex(int(params, 16))} not found"
             case "CALLSITES":
                 for callsite in params.split(','):
                     callsite = b.model.get_node(int(callsite, 16))

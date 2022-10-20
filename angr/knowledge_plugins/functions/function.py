@@ -885,12 +885,13 @@ class Function(Serializable):
 
         assert node.addr in self._local_block_addrs, IPython.embed()       
 
-        node_successors = list(map(lambda x: x[1], filter(lambda x: node.addr == x[0].addr, self.transition_graph.edges)))
-        node_predecessors = list(map(lambda x: x[0], filter(lambda x: node.addr == x[1].addr, self.transition_graph.edges)))
+        node_successors = set(map(lambda x: x[1], filter(lambda x: node.addr == x[0].addr, self.transition_graph.edges)))
+        node_predecessors = set(map(lambda x: x[0], filter(lambda x: node.addr == x[1].addr, self.transition_graph.edges)))
 
         for s in node_successors:
             self.transition_graph.remove_edge(node, s)
             self.transition_graph.add_edge(cdr_bb, s)
+
 
         for p in node_predecessors:
             self.transition_graph.remove_edge(p, node)

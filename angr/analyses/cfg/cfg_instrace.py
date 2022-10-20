@@ -409,10 +409,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 				assert node.size == group.size		
 
-				# TODO: this isn't necessary anymore. Delete only after testing well
-				# elif node.size != group.size:
-				# 	(node, _) = self.split_node(node, group.addr + group.size, tid) 
-
 			else:
 				# check if we are jumping in the middle of a block, or in the middle of
 				# an instruction
@@ -591,10 +587,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 							node = BasicBlock(addr = t, is_phantom = True)
 							self.model.add_node(t, node)
 
-							# TODO: seems useless. Delete afer massive testing
-							# to_invalid = [x for x in self.lift_cache.values() if x.addr <= t and t < x.addr + x.size]
-							# for i in to_invalid:
-							# 	del self.lift_cache[i.addr]
 
 
 						self._current[tid].function._transit_to(working, node)                       
