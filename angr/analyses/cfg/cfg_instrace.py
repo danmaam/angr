@@ -16,11 +16,7 @@ from copy import copy
 import sys
 from matplotlib.pyplot import pause
 import ipdb
-
-# TODO: Save nodes in function and non in general CFGModel
-# TODO: Check how to get nodes from function graph
-# TODO: add callgraph in general CFGModel
-# TODO: problem with pyvex on address 7F41D1F21BE0. It detects jump in middle of instruction because instructions are not in instruction_address
+import re
 
 from sympy import Q, false, true
 import angr
@@ -46,8 +42,10 @@ import archinfo
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('WARNING'))
+l.setLevel(logging.getLevelName('DEBUG'))
 
+
+#TODO: heuristics doesn't work well since stackpointer is took after returns and calls
 
 
 
@@ -75,8 +73,8 @@ class BasicBlockJob(CFGJob):
 		super().__init__(destination, tid, addr, process)
 	 
 		self.bytecode = bytecode
-		self.start_sp = start_sp
-		self.exit_sp = exit_sp
+		self.entryRSP = start_sp
+		self.exitRSP = exit_sp
 		self.block_irsb = None
 
 class SignalJob(CFGJob):
@@ -185,24 +183,30 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 
-
-
 	def ProcessNewBasicBlock(self, job: BasicBlockJob):
 		tid = job.tid
+		job.block_irsb =  self.LiftBasicBlock(job)
 
-		if self.should_target_be_tracked(job.addr):
-			if self._current[tid].function is None:
-				self.init_thread(job.tid, block_head=job.addr)
-			job.block_irsb =  self.LiftBasicBlock(job)
+		if job.destination == 0x4011d6:
+			ipdb.set_trace()
+
+		if self._current[tid].function is None:
+			self.init_thread(job.tid, block_head=job.addr)	
+
+		if self.should_target_be_tracked(job.addr):		
 			self.process_group(job)
 			self.process_type(job.destination, job.tid)
+
+		elif self.should_target_be_tracked(job.destination) and job.block_irsb.jumpkind == 'Ijk_Call':
+			self.process_group(job, transit_to = False)
+			self.process_type(job.destination, job.tid)
+
  
 
 
 
 	def is_plt_plt_got(self, target):
 		return any(target >= start and target < end for start, end in self.plt_sections)
-
 	
 	def NewInstruction(self, job: InstructionJob):
 		return
@@ -241,13 +245,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		# Clear the lift context for the current thread
 
 		if l.level <= logging.DEBUG:
-			if self.should_target_be_tracked(head):
-				self.disasm(bytecode, head)
-				pass
+			self.disasm(bytecode, head)
+			pass
 
 		return irsb
 
-	
 
 	def OPNewInstruction(self, check = True):
 
@@ -332,7 +334,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def process_raised_signal(self, job: SignalJob):
 		tid = job.tid
 		# for now just add a callsite
-		# TODO: improve signal raise location
 		self._current[tid].function._add_call_site(self._current[tid].working._irsb.instruction_addresses[-1], job.destination, None)
 
 		self._state_stack[tid].insert(0, (self._current[tid], self._callstack[tid]))
@@ -384,14 +385,14 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		job.process(job)
 
 
-	def process_group(self, job: CFGJob) -> None:
+	def process_group(self, job: BasicBlockJob, transit_to = True) -> None:
 		l.debug(f"TID {job.tid} processing group {hex(job.addr)} in function {hex(self._current[job.tid].function.addr)}")
 		tid = job.tid
 		group : pyvex.IRSB = job.block_irsb
 		working : BasicBlock = self._current[tid].working
-
+			
 		if working is None:
-			self._current[tid].rsp_at_entrypoint = job.start_sp
+			self._current[tid].rsp_at_entrypoint = job.entryRSP
 
 		# search for a node at the same address in the model
 		assert len(self.model.get_all_nodes(addr = group.addr, anyaddr = True)) <= 1
@@ -432,17 +433,18 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		
 		assert node is not None
 
-		if working is not None:
-			self._current[tid].function._transit_to(working, node)
-		else:
-			self._current[tid].function._register_nodes(True, node)
+		if transit_to:
+			if working is not None:
+				self._current[tid].function._transit_to(working, node)
+			else:
+				self._current[tid].function._register_nodes(True, node)
 
 		self._current[tid].working = node
 		self._current[tid].working.prev_jump_target[tid] = job.destination
 
 
 		# set the stack pointer of exit from the basic block
-		self._current[tid].sp = job.exit_sp
+		self._current[tid].sp = job.exitRSP
 
 		assert self._current[tid].working is not None
 		return     
@@ -496,10 +498,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			if x <= target and target < y:
 				return False
 		return True
-		
+	
+	
+
 	def process_type(self, target, tid):
 		l.debug(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
-		
+
 		working : BasicBlock = self._current[tid].working
 		jumpkind = working._irsb.jumpkind
 		rip = working._irsb.instruction_addresses[-1]
@@ -644,9 +648,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			l.info(f"TID {tid}: Returning to {hex(target)} | Depth: {len(self._callstack[tid])}")
 
 			try:
-				if not self.should_target_be_tracked(target):
-					l.warning("Ignoring return since it's to a library function")
-					return
+				# if not self.should_target_be_tracked(target):
+				# 	l.warning("Ignoring return since it's to a library function")
+				# 	return
 				
 				stack_top = copy(self._callstack[tid])
 				
@@ -656,13 +660,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				assert stack_top.ret_addr == target, f"TID {tid}: ret_addr: {hex(stack_top.ret_addr)}, actual_target: {hex(target)}, func: {hex(self._current[tid].function.addr)}"
 
 				(func, working_bb, stack_ptr, rsp_entry) = (stack_top.current.function, stack_top.current.working, stack_top.current.sp, stack_top.current.rsp_at_entrypoint)
-				# TODO: don't remember why there is this check, reintroduce it when i remember why it's there
-				# assert self._callstack[tid].stack_ptr == self._current[tid].sp, hex(self._callstack[tid].stack_ptr) + " " + hex(self._current[tid].sp)
 				self._current[tid] = self.State(function=func, \
 												working=working_bb, \
 												sp=stack_ptr, \
 												entry_rsp=rsp_entry)
-				assert self._current[tid].working.addr in self._current[tid].function.block_addrs_set
+
+
 				# it's returning, so remove the call from the callout and put it in the call list
 				try:
 					self._current[tid].function._callout_sites.remove(working_bb)
