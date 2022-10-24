@@ -98,8 +98,6 @@ with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:
 
             
 
-
-IPython.embed()
 print(" === TEST PASSED === ")
                 
 

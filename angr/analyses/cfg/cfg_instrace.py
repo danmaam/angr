@@ -42,7 +42,7 @@ import archinfo
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('DEBUG'))
+l.setLevel(logging.getLevelName('WARNING'))
 
 
 #TODO: heuristics doesn't work well since stackpointer is took after returns and calls
@@ -185,10 +185,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 	def ProcessNewBasicBlock(self, job: BasicBlockJob):
 		tid = job.tid
-		job.block_irsb =  self.LiftBasicBlock(job)
-
-		if job.destination == 0x4011d6:
-			ipdb.set_trace()
+		job.block_irsb = self.LiftBasicBlock(job)
 
 		if self._current[tid].function is None:
 			self.init_thread(job.tid, block_head=job.addr)	
@@ -197,11 +194,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			self.process_group(job)
 			self.process_type(job.destination, job.tid)
 
-		elif self.should_target_be_tracked(job.destination) and job.block_irsb.jumpkind == 'Ijk_Call':
+		elif self.should_target_be_tracked(job.destination):
 			self.process_group(job, transit_to = False)
-			self.process_type(job.destination, job.tid)
-
- 
+			self.process_type(job.destination, job.tid, outside = True)
 
 
 
@@ -501,22 +496,50 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	
 	
 
-	def process_type(self, target, tid):
-		l.debug(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
-
+	def process_type(self, target, tid, outside=False):
+		
 		working : BasicBlock = self._current[tid].working
 		jumpkind = working._irsb.jumpkind
 		rip = working._irsb.instruction_addresses[-1]
 
+		def Ijk_Call(self, target, tid):			# Check if it's a call to a library function
 
-		# get all the possible jump targets from the current block
-		jump_targets = working._irsb.constant_jump_targets.copy()
-		jump_targets.add(target)
-		jump_targets = set(filter(lambda x: not (working.addr <= x and x < working.addr + working.size), jump_targets))
+			return_address = working.addr + working.size
 
-		assert len(jump_targets) <= 2
+			if self.should_target_be_tracked(target):
 
-		if jumpkind == 'Ijk_Boring':
+				# Register the call site in the current function            
+				called = self.functions.function(target, create = True)
+
+				# Try to calculate the return from the call, so that it's possible to create the phantom node				
+				# Search for return node in model. If it doesn't exist, create a phantom one
+				assert len(self.model.get_all_nodes(addr = return_address, anyaddr = True)) <= 1
+
+				return_node = self.model.get_node(return_address)
+
+				if return_node is None:
+					return_node = BasicBlock(return_address, is_phantom = True)
+					self.model.add_node(return_address, return_node)
+				
+				self._current[tid].function._callout_sites.add(working)
+
+				l.info(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
+
+				self._callstack[tid] = self._callstack[tid].call(rip, target, retn_target=return_address,
+								current=self._current[tid])				
+				
+				self._current[tid] = self.State(function=called, working=None)
+				assert self._current[tid].function.addr == target
+
+			else:
+				l.debug("Ignoring call @" + hex(rip) + " since it's to a library function")
+
+		def Ijk_Boring(self, target, tid):
+			jump_targets = working._irsb.constant_jump_targets.copy()
+			jump_targets.add(target)
+			jump_targets = set(filter(lambda x: not (working.addr <= x and x < working.addr + working.size), jump_targets))
+
+			assert len(jump_targets) <= 2
 			# herustic checks for call similarity
 
 			# 1. pruned jump check
@@ -527,7 +550,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				if len(jump_targets) == 1 and not self.should_target_be_tracked(target): 
 
 					self._current[tid].function.add_jumpout_site(self._current[tid].working)
-
+					callee = self._current[tid].function
+					
 					# get stub function from call stack and pop the callstack
 					(caller, working_bb, ret_addr, exit_sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)					
 
@@ -539,13 +563,28 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					# set the new state
 					self._current[tid] = self.State(function=caller, working=working_bb, sp = exit_sp, entry_rsp=entry_rsp)
 
+					try:
+						self._current[tid].function._callout_sites.remove(working_bb)
+					except:
+						pass
+					
+					# check if it's a direct or an indirect call; if indirect, doesn't save target
+					self.functions._add_call_to(self._current[tid].function.addr, 	
+												working_bb, \
+												callee.addr, \
+												self.model.get_node(target), ins_addr = rip
+												)
+
 					l.info(f"TID {tid}: Jump stub, returning to {hex(ret_addr)}")
+
+
+
 					l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
 					return
 
+				assert self.should_target_be_tracked(target)
 				# it's not a call to a library function; apply heuristics for call similarity
 				# 2. exclusion checks		
-
 				if  self.OS == 'Linux' and self.is_plt_plt_got(target) and self.is_plt_plt_got(rip) or \
 					self._current[tid].rsp_at_entrypoint != self._current[tid].sp or \
 					self._current[tid].function.addr <= target and target <= rip or \
@@ -579,7 +618,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			else:
 				is_jump = True
 
-			if is_jump:
+			if is_jump and not outside:
 				for t in jump_targets:
 					if t != target:
 						assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
@@ -595,50 +634,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 
 
-						self._current[tid].function._transit_to(working, node)                       
+						self._current[tid].function._transit_to(working, node)    
 
-		elif jumpkind == 'Ijk_Splitted':
-			node = self.model.get_node(working._irsb.next.addr)
-			self._current[tid].function._transit_to(working, node)
+		def Ijk_Nop(self, target, tid):
 
-		elif jumpkind == "Ijk_Yield":
-			pass
+			return
 
-		
-		elif jumpkind == 'Ijk_Call': 
-			# Check if it's a call to a library function
-
-			return_address = working.addr + working.size
-
-			if self.should_target_be_tracked(target):
-
-				# Register the call site in the current function            
-				called = self.functions.function(target, create = True)
-
-				# Try to calculate the return from the call, so that it's possible to create the phantom node				
-				# Search for return node in model. If it doesn't exist, create a phantom one
-				assert len(self.model.get_all_nodes(addr = return_address, anyaddr = True)) <= 1
-
-				return_node = self.model.get_node(return_address)
-
-				if return_node is None:
-					return_node = BasicBlock(return_address, is_phantom = True)
-					self.model.add_node(return_address, return_node)
-				
-				self._current[tid].function._callout_sites.add(working)
-
-				l.info(f"TID {tid}: " + hex(rip) + ": Processing call to " + hex(target) + " | ret addr at " + hex(return_address))
-
-				self._callstack[tid] = self._callstack[tid].call(rip, target, retn_target=return_address,
-								current=self._current[tid])				
-				
-				self._current[tid] = self.State(function=called, working=None)
-				assert self._current[tid].function.addr == target
-
-			else:
-				l.debug("Ignoring call @" + hex(rip) + " since it's to a library function")
-		
-		elif jumpkind == 'Ijk_Ret' and self._callstack[tid]:
+		def Ijk_Ret(self, target, tid):
 			# TODO: find out if the edges to be addedd are necessary 
 
 			self._current[tid].function._add_return_site(self._current[tid].working)
@@ -648,16 +650,19 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			l.info(f"TID {tid}: Returning to {hex(target)} | Depth: {len(self._callstack[tid])}")
 
 			try:
-				# if not self.should_target_be_tracked(target):
-				# 	l.warning("Ignoring return since it's to a library function")
-				# 	return
 				
 				stack_top = copy(self._callstack[tid])
 				
 				self._callstack[tid] = self._callstack[tid].pop()
 
 				# restore status after return
-				assert stack_top.ret_addr == target, f"TID {tid}: ret_addr: {hex(stack_top.ret_addr)}, actual_target: {hex(target)}, func: {hex(self._current[tid].function.addr)}"
+				try:
+					assert stack_top.ret_addr == target, f"TID {tid}: ret_addr: {hex(stack_top.ret_addr)}, actual_target: {hex(target)}, func: {hex(self._current[tid].function.addr)}"
+				except Exception as e:
+					if not self.should_target_be_tracked(target):
+						l.warning(f"TID {tid}: ret_addr: {hex(stack_top.ret_addr)} ignored since it's to a library function")
+					else:
+						raise e
 
 				(func, working_bb, stack_ptr, rsp_entry) = (stack_top.current.function, stack_top.current.working, stack_top.current.sp, stack_top.current.rsp_at_entrypoint)
 				self._current[tid] = self.State(function=func, \
@@ -677,19 +682,24 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 											callee.addr, \
 											self.model.get_node(target), ins_addr = rip
 											)
-						
 
-			
 			except SimEmptyCallStackError:
 				l.warning("Stack empty")
 
-		elif jumpkind == "Ijk_Sys_syscall":
-			# don't anything. transition graph will be update in process group
-			pass 
+		l.debug(f"TID {tid}: PROCESS_TYPE: function: {hex(self._current[tid].function.addr)}, working : {hex(self._current[tid].working.addr)}, target: {hex(target)}")
 
-		else:
-			raise NotImplementedError("Unsupported jumpkind: " + jumpkind)
-
+		OperationSwitcher = {
+			"Ijk_Call": Ijk_Call,
+			"Ijk_Boring": Ijk_Boring,
+			"Ijk_Sys_syscall": Ijk_Nop,
+			"Ijk_Yield": Ijk_Nop,
+			"Ijk_Ret": Ijk_Ret
+		}
+		try:
+			OperationSwitcher[jumpkind](self, target, tid)
+		except KeyError:
+			l.error(f"Unknown jumpkind {jumpkind}")
+			exit(-1)
 
 	# From the execution trace, detects and create the next IR group to be processed
 	def _get_successors(self, job: CFGJob) -> List[CFGJob]:
