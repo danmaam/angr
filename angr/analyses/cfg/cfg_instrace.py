@@ -16,6 +16,7 @@ from copy import copy
 import sys
 from matplotlib.pyplot import pause
 import ipdb
+import IPython
 import re
 
 from sympy import Q, false, true
@@ -57,8 +58,10 @@ class CFGJob():
 		self.tid = tid
 		self.addr = addr
 		self.process = process
-		
-	
+
+class NOPJob(CFGJob):
+	def __init__(self, destination: int, tid: int, addr: int, process):
+		super().__init__(destination, tid, addr, process)
 
 class InstructionJob(CFGJob):
 	def __init__(self, destination: int, tid: int, addr: int, process, sp: int):
@@ -187,23 +190,22 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		tid = job.tid
 		job.block_irsb = self.LiftBasicBlock(job)
 
+		IsControlFlowOutsideFunction = not self.should_target_be_tracked(job.addr) and self.should_target_be_tracked(job.destination)
+
+		assert self.should_target_be_tracked(job.addr) or self.should_target_be_tracked(job.destination)
+
 		if self._current[tid].function is None:
 			self.init_thread(job.tid, block_head=job.addr)	
 
-		if self.should_target_be_tracked(job.addr):		
-			self.process_group(job)
-			self.process_type(job.destination, job.tid)
-
-		elif self.should_target_be_tracked(job.destination):
-			self.process_group(job, transit_to = False)
-			self.process_type(job.destination, job.tid, outside = True)
+		self.process_group(job, outside = IsControlFlowOutsideFunction)
+		self.process_type(job.destination, job.tid, outside = IsControlFlowOutsideFunction, job = job)
 
 
 
 	def is_plt_plt_got(self, target):
 		return any(target >= start and target < end for start, end in self.plt_sections)
 	
-	def NewInstruction(self, job: InstructionJob):
+	def Nop(self, job: InstructionJob):
 		return
 
 	def LiftBasicBlock(self, job: BasicBlockJob):
@@ -244,38 +246,72 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			pass
 
 		return irsb
-
-
-	def OPNewInstruction(self, check = True):
-
+	
+	def DumpInstruction(self):
 		curr_chunk = self._ins_trace.read(20)
 		ip = struct.unpack('<Q', curr_chunk[:8])[0]
-		sp = struct.unpack('<Q', curr_chunk[8:16])[0]
+		rsp = struct.unpack('<Q', curr_chunk[8:16])[0]
 		tid =  struct.unpack('<I', curr_chunk[16:20])[0]
 
-		self.perThreadContext[tid].entryRSP = sp if self.perThreadContext[tid].entryRSP is None else self.perThreadContext[tid].entryRSP
-		self.perThreadContext[tid].block_head = ip if self.perThreadContext[tid].block_head is None else self.perThreadContext[tid].block_head
-		
+		return (ip, rsp, tid)
+
+	def UpdateThreadContext(self, ip, rsp, tid):
+		self.perThreadContext[tid].entryRSP = rsp if self.perThreadContext[tid].entryRSP is None else self.perThreadContext[tid].entryRSP
+		self.perThreadContext[tid].block_head = ip if self.perThreadContext[tid].block_head is None else self.perThreadContext[tid].block_head		
 		self.perThreadContext[tid].bytecode += self.project.loader.instruction_memory.load_instruction(ip)
 
-		# Check if we covered part of a block or not
-		size = len(self.perThreadContext[tid].bytecode)
-		head = self.perThreadContext[tid].block_head
+	
 
-		if check and head + size in self.model._nodes_by_addr:
-			return self.GenerateBasicBlockJob(sp, tid)
 
-		return [InstructionJob(0, tid, ip, self.NewInstruction, sp)]
+
+	def OPNewInstruction(self):
+
+		(ip, rsp, tid) = self.DumpInstruction()		
+		# Checks if we are in the analyzed binary, or in a CF instruction of a library
+		# to an instruction in the analyzed binary
+		if self.should_target_be_tracked(ip):
+			self.UpdateThreadContext(ip, rsp, tid)
+			# Check if we covered part of a block or not
+			size = len(self.perThreadContext[tid].bytecode)
+			head = self.perThreadContext[tid].block_head
+
+			if head + size in self.model._nodes_by_addr:
+				return self.GenerateBasicBlockJob(rsp, tid)
+		
+		return [InstructionJob(0, tid, ip, self.Nop, rsp)]
 
 
 	def OPControlFlowInstruction(self):
 
-		job = self.OPNewInstruction(check = False)[0]
-		(tid, exitRSP) = (job.tid, job.sp)
+		(ip, exitRSP, tid) = self.DumpInstruction()
+		dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
+		head = self.perThreadContext[tid].block_head if self.perThreadContext[tid].block_head is not None else ip
+		bytecode = self.project.loader.instruction_memory.load_instruction(ip)
 
-		destination = struct.unpack('<Q', self._ins_trace.read(8))[0]
+		jumpkind = pyvex.lift(bytecode, 0x0, archinfo.ArchAMD64()).jumpkind
 
-		return self.GenerateBasicBlockJob(exitRSP, tid, destination)
+		dst_tracked = self.should_target_be_tracked(dst)
+		ip_tracked = self.should_target_be_tracked(head)
+		generate = False
+
+		match jumpkind:
+			case 'Ijk_Ret':
+				if self.should_target_be_tracked(head):
+					generate = True
+			case 'Ijk_Boring':
+				if dst_tracked or ip_tracked:
+					generate = True
+			case 'Ijk_Call':
+				if dst_tracked or ip_tracked:
+					generate = True
+			case _:
+				generate = True if ip_tracked else False
+
+		if generate:			
+			self.UpdateThreadContext(ip, exitRSP, tid)
+			return self.GenerateBasicBlockJob(exitRSP, tid, dst)
+		else:
+			return [NOPJob(0,0,0, self.Nop)]
 
 
 	def GenerateBasicBlockJob(self, exitRSP, tid, destination = None):
@@ -380,7 +416,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		job.process(job)
 
 
-	def process_group(self, job: BasicBlockJob, transit_to = True) -> None:
+	def process_group(self, job: BasicBlockJob, outside = False) -> None:
 		l.debug(f"TID {job.tid} processing group {hex(job.addr)} in function {hex(self._current[job.tid].function.addr)}")
 		tid = job.tid
 		group : pyvex.IRSB = job.block_irsb
@@ -428,14 +464,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		
 		assert node is not None
 
-		if transit_to:
+		if not outside:
 			if working is not None:
 				self._current[tid].function._transit_to(working, node)
 			else:
 				self._current[tid].function._register_nodes(True, node)
 
 		self._current[tid].working = node
-		self._current[tid].working.prev_jump_target[tid] = job.destination
 
 
 		# set the stack pointer of exit from the basic block
@@ -496,13 +531,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	
 	
 
-	def process_type(self, target, tid, outside=False):
+	def process_type(self, target, tid, outside=False, job = None):
 		
 		working : BasicBlock = self._current[tid].working
 		jumpkind = working._irsb.jumpkind
 		rip = working._irsb.instruction_addresses[-1]
 
-		def Ijk_Call(self, target, tid):			# Check if it's a call to a library function
+		def Ijk_Call(self, target, tid, job = None):			# Check if it's a call to a library function
 
 			return_address = working.addr + working.size
 
@@ -534,113 +569,108 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			else:
 				l.debug("Ignoring call @" + hex(rip) + " since it's to a library function")
 
-		def Ijk_Boring(self, target, tid):
+		def Ijk_Boring(self, target, tid, job = None):
 			jump_targets = working._irsb.constant_jump_targets.copy()
 			jump_targets.add(target)
 			jump_targets = set(filter(lambda x: not (working.addr <= x and x < working.addr + working.size), jump_targets))
-
-			assert len(jump_targets) <= 2
+			assert len(jump_targets) <= 2, IPython.embed()
 			# herustic checks for call similarity
 
 			# 1. pruned jump check
 			if rip not in self.pruned_jumps:
 				
-				# check in before we are in a jmp stub 
-				# since library function are not tracked, we need to fix the callstack
-				if len(jump_targets) == 1 and not self.should_target_be_tracked(target): 
+				# Check it's not a jump stup to a library
+				if len(jump_targets) == 1:
 
-					self._current[tid].function.add_jumpout_site(self._current[tid].working)
-					callee = self._current[tid].function
-					
-					# get stub function from call stack and pop the callstack
-					(caller, working_bb, ret_addr, exit_sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)					
+					if not self.should_target_be_tracked(target): 
 
-					self._callstack[tid] = self._callstack[tid].pop()
-
-					# add a fake return from the stub to the caller of the stub
-					self._current[tid].function._fakeret_to(self._current[tid].working, caller)
-
-					# set the new state
-					self._current[tid] = self.State(function=caller, working=working_bb, sp = exit_sp, entry_rsp=entry_rsp)
-
-					try:
-						self._current[tid].function._callout_sites.remove(working_bb)
-					except:
-						pass
-					
-					# check if it's a direct or an indirect call; if indirect, doesn't save target
-					self.functions._add_call_to(self._current[tid].function.addr, 	
-												working_bb, \
-												callee.addr, \
-												self.model.get_node(target), ins_addr = rip
-												)
-
-					l.info(f"TID {tid}: Jump stub, returning to {hex(ret_addr)}")
-
-
-
-					l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
-					return
-
-				assert self.should_target_be_tracked(target)
-				# it's not a call to a library function; apply heuristics for call similarity
-				# 2. exclusion checks		
-				if  self.OS == 'Linux' and self.is_plt_plt_got(target) and self.is_plt_plt_got(rip) or \
-					self._current[tid].rsp_at_entrypoint != self._current[tid].sp or \
-					self._current[tid].function.addr <= target and target <= rip or \
-					any(rip <= target and target <= ret.addr for ret in self._current[tid].function.ret_sites):
-
-					self.pruned_jumps.add(rip)
-					is_jump = True
-
-				else:            
-					# inclusion checks
-					# TODO: make the check with filter better
-					if  self.functions.function(addr=target) or \
-						target <= self._current[tid].function.addr or \
-						len(list(filter(lambda x: self._current[tid].working.addr in x._local_block_addrs, self.functions._function_map.values()))) == 1 and \
-						any(rip <= func and func <= target for func in self.functions._function_map.keys()):
-
-						l.info(f"TID {tid}: @{hex(rip)} Detected a call with call similarity heuristics with dst {hex(target)}")
-						# Heuristics show it's a call. Fix the current function with the effectively called
-						# without pushing anything on the callstack
-						# TODO: check if it's necessarty to add a new edge 
-						self._current[tid].function.add_jumpout_site(self._current[tid].working)      
+						self._current[tid].function.add_jumpout_site(self._current[tid].working)
+						callee = self._current[tid].function
 						
-						self._current[tid] = self.State(function=self.functions.function(target, create = True), working = None)
-						is_jump = False
-					
-					# Default policy: it's a jump
+						# get stub function from call stack and pop the callstack
+						(caller, working_bb, ret_addr, exit_sp, entry_rsp) = (self._callstack[tid].current.function, self._callstack[tid].current.working, self._callstack[tid].ret_addr, self._callstack[tid].current.sp, self._callstack[tid].current.rsp_at_entrypoint)					
+
+						self._callstack[tid] = self._callstack[tid].pop()
+
+						# add a fake return from the stub to the caller of the stub
+						self._current[tid].function._fakeret_to(self._current[tid].working, caller)
+
+						# set the new state
+						self._current[tid] = self.State(function=caller, working=working_bb, sp = exit_sp, entry_rsp=entry_rsp)
+
+						try:
+							self._current[tid].function._callout_sites.remove(working_bb)
+						except:
+							pass
+						
+						# check if it's a direct or an indirect call; if indirect, doesn't save target
+						self.functions._add_call_to(self._current[tid].function.addr, 	
+													working_bb, \
+													callee.addr, \
+													self.model.get_node(target), ins_addr = rip
+													)
+
+						l.info(f"TID {tid}: Jump stub, returning to {hex(ret_addr)}")
+
+
+
+						l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
+
 					else:
-						self.pruned_jumps.add(rip)
-						is_jump = True
-			
-			else:
-				is_jump = True
+						# it's not a call to a library function; apply heuristics for call similarity
+						# 2. exclusion checks		
+						if  self.OS == 'Linux' and self.is_plt_plt_got(target) and self.is_plt_plt_got(rip) or \
+							self._current[tid].rsp_at_entrypoint != self._current[tid].sp or \
+							self._current[tid].function.addr <= target and target <= rip or \
+							any(rip <= target and target <= ret.addr for ret in self._current[tid].function.ret_sites):
 
-			if is_jump and not outside:
-				for t in jump_targets:
-					if t != target:
-						assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
-						node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
+							self.pruned_jumps.add(rip)
 
-						if node is not None:
-							assert isinstance(node, BasicBlock)
-							if not node.is_phantom and node.addr != t:
-								(_, node) = self.split_node(node, t, tid)
-						else:
-							node = BasicBlock(addr = t, is_phantom = True)
-							self.model.add_node(t, node)
+						else:            
+							# inclusion checks
+							# TODO: make the check with filter better
+							if  self.functions.function(addr=target) or \
+								target <= self._current[tid].function.addr or \
+								len(list(filter(lambda x: self._current[tid].working.addr in x._local_block_addrs, self.functions._function_map.values()))) == 1 and \
+								any(rip <= func and func <= target for func in self.functions._function_map.keys()):
+
+								l.info(f"TID {tid}: @{hex(rip)} Detected a call with call similarity heuristics with dst {hex(target)}")
+								# Heuristics show it's a call. Fix the current function with the effectively called
+								# without pushing anything on the callstack
+								# TODO: check if it's necessarty to add a new edge 
+								self._current[tid].function.add_jumpout_site(self._current[tid].working)      
+								
+								self._current[tid] = self.State(function=self.functions.function(target, create = True), working = None)
+
+							
+							# Default policy: it's a jump
+							else:
+								self.pruned_jumps.add(rip)
+
+					return
+				
+				else:
+					assert not outside
+					for t in jump_targets:
+						if t != target:
+							assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
+							node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
+
+							if node is not None:
+								assert isinstance(node, BasicBlock)
+								if not node.is_phantom and node.addr != t:
+									(_, node) = self.split_node(node, t, tid)
+							else:
+								node = BasicBlock(addr = t, is_phantom = True)
+								self.model.add_node(t, node)
+
+							self._current[tid].function._transit_to(working, node)
 
 
-
-						self._current[tid].function._transit_to(working, node)    
-
-		def Ijk_Nop(self, target, tid):
-
+		def Ijk_Nop(self, target, tid, job = None):
 			return
 
-		def Ijk_Ret(self, target, tid):
+		def Ijk_Ret(self, target, tid, job = None):
 			# TODO: find out if the edges to be addedd are necessary 
 
 			self._current[tid].function._add_return_site(self._current[tid].working)
@@ -649,8 +679,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 			l.info(f"TID {tid}: Returning to {hex(target)} | Depth: {len(self._callstack[tid])}")
 
-			try:
-				
+			try:					
 				stack_top = copy(self._callstack[tid])
 				
 				self._callstack[tid] = self._callstack[tid].pop()
@@ -662,6 +691,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					if not self.should_target_be_tracked(target):
 						l.warning(f"TID {tid}: ret_addr: {hex(stack_top.ret_addr)} ignored since it's to a library function")
 					else:
+						l.error(f"TID {tid}: ret_addr: {hex(stack_top.ret_addr)}, actual_target: {hex(target)}, func: {hex(self._current[tid].function.addr)}")
+						IPython.embed()
 						raise e
 
 				(func, working_bb, stack_ptr, rsp_entry) = (stack_top.current.function, stack_top.current.working, stack_top.current.sp, stack_top.current.rsp_at_entrypoint)
@@ -696,7 +727,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			"Ijk_Ret": Ijk_Ret
 		}
 		try:
-			OperationSwitcher[jumpkind](self, target, tid)
+			OperationSwitcher[jumpkind](self, target, tid, job = job)
 		except KeyError:
 			l.error(f"Unknown jumpkind {jumpkind}")
 			exit(-1)
