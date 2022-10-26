@@ -102,7 +102,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			self.sp = sp
 			self.rsp_at_entrypoint = entry_rsp
 
-
 		def pp(self):
 			print(hex(self.working.addr))
 
@@ -192,7 +191,12 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		IsControlFlowOutsideFunction = not self.should_target_be_tracked(job.addr) and self.should_target_be_tracked(job.destination)
 
-		assert self.should_target_be_tracked(job.addr) or self.should_target_be_tracked(job.destination)
+		try:
+			assert self.should_target_be_tracked(job.addr) or self.should_target_be_tracked(job.destination)
+		except Exception as e:
+			IPython.embed()
+			raise e
+
 
 		if self._current[tid].function is None:
 			self.init_thread(job.tid, block_head=job.addr)	
@@ -261,22 +265,18 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self.perThreadContext[tid].bytecode += self.project.loader.instruction_memory.load_instruction(ip)
 
 	
-
-
-
 	def OPNewInstruction(self):
 
 		(ip, rsp, tid) = self.DumpInstruction()		
 		# Checks if we are in the analyzed binary, or in a CF instruction of a library
 		# to an instruction in the analyzed binary
-		if self.should_target_be_tracked(ip):
-			self.UpdateThreadContext(ip, rsp, tid)
-			# Check if we covered part of a block or not
-			size = len(self.perThreadContext[tid].bytecode)
-			head = self.perThreadContext[tid].block_head
+		self.UpdateThreadContext(ip, rsp, tid)
+		# Check if we covered part of a block or not
+		size = len(self.perThreadContext[tid].bytecode)
+		head = self.perThreadContext[tid].block_head
 
-			if head + size in self.model._nodes_by_addr:
-				return self.GenerateBasicBlockJob(rsp, tid)
+		if head + size in self.model._nodes_by_addr:
+			return self.GenerateBasicBlockJob(rsp, tid)
 		
 		return [InstructionJob(0, tid, ip, self.Nop, rsp)]
 
@@ -285,33 +285,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		(ip, exitRSP, tid) = self.DumpInstruction()
 		dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
-		head = self.perThreadContext[tid].block_head if self.perThreadContext[tid].block_head is not None else ip
-		bytecode = self.project.loader.instruction_memory.load_instruction(ip)
-
-		jumpkind = pyvex.lift(bytecode, 0x0, archinfo.ArchAMD64()).jumpkind
-
-		dst_tracked = self.should_target_be_tracked(dst)
-		ip_tracked = self.should_target_be_tracked(head)
-		generate = False
-
-		match jumpkind:
-			case 'Ijk_Ret':
-				if self.should_target_be_tracked(head):
-					generate = True
-			case 'Ijk_Boring':
-				if dst_tracked or ip_tracked:
-					generate = True
-			case 'Ijk_Call':
-				if dst_tracked or ip_tracked:
-					generate = True
-			case _:
-				generate = True if ip_tracked else False
-
-		if generate:			
-			self.UpdateThreadContext(ip, exitRSP, tid)
-			return self.GenerateBasicBlockJob(exitRSP, tid, dst)
-		else:
-			return [NOPJob(0,0,0, self.Nop)]
+		
+		self.UpdateThreadContext(ip, exitRSP, tid)
+		return self.GenerateBasicBlockJob(exitRSP, tid, dst)
 
 
 	def GenerateBasicBlockJob(self, exitRSP, tid, destination = None):
@@ -575,6 +551,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			jump_targets = set(filter(lambda x: not (working.addr <= x and x < working.addr + working.size), jump_targets))
 			assert len(jump_targets) <= 2, IPython.embed()
 			# herustic checks for call similarity
+			
+			# TODO: fix phantom nodes not created if not in pruned jumps
 
 			# 1. pruned jump check
 			if rip not in self.pruned_jumps:
@@ -583,7 +561,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				if len(jump_targets) == 1:
 
 					if not self.should_target_be_tracked(target): 
-
+						# Jump stub to library
 						self._current[tid].function.add_jumpout_site(self._current[tid].working)
 						callee = self._current[tid].function
 						
@@ -612,9 +590,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 						l.info(f"TID {tid}: Jump stub, returning to {hex(ret_addr)}")
 
-
-
 						l.debug(f"Function: {hex(self._current[tid].function.addr)}, {hex(self._current[tid].working.addr)}")
+
+						return
 
 					else:
 						# it's not a call to a library function; apply heuristics for call similarity
@@ -642,29 +620,29 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 								
 								self._current[tid] = self.State(function=self.functions.function(target, create = True), working = None)
 
+								return
+
 							
 							# Default policy: it's a jump
 							else:
 								self.pruned_jumps.add(rip)
-
-					return
 				
-				else:
-					assert not outside
-					for t in jump_targets:
-						if t != target:
-							assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
-							node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
+			
+			if not outside:
+				for t in jump_targets:
+					if t != target:
+						assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
+						node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
 
-							if node is not None:
-								assert isinstance(node, BasicBlock)
-								if not node.is_phantom and node.addr != t:
-									(_, node) = self.split_node(node, t, tid)
-							else:
-								node = BasicBlock(addr = t, is_phantom = True)
-								self.model.add_node(t, node)
+						if node is not None:
+							assert isinstance(node, BasicBlock)
+							if not node.is_phantom and node.addr != t:
+								(_, node) = self.split_node(node, t, tid)
+						else:
+							node = BasicBlock(addr = t, is_phantom = True)
+							self.model.add_node(t, node)
 
-							self._current[tid].function._transit_to(working, node)
+						self._current[tid].function._transit_to(working, node)
 
 
 		def Ijk_Nop(self, target, tid, job = None):
