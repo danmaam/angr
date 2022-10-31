@@ -43,7 +43,7 @@ import archinfo
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('WARNING'))
+l.setLevel(logging.getLevelName('DEBUG'))
 
 
 #TODO: heuristics doesn't work well since stackpointer is took after returns and calls
@@ -177,11 +177,15 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			b"\x00": self.OPNewInstruction,
 			b"\x01": self.OPControlFlowInstruction,
 			b"\x02": self.OPRaisedSignal,
-			b"\x03": self.OPReturnFromSignal
+			b"\x03": self.OPReturnFromSignal,
+			b"\x04": self.OPLibCFGIns
 		}
 
 		self._state_stack = defaultdict(lambda: [])
-		self._analyze()   
+		self._analyze() 
+
+
+
 
 
 
@@ -280,6 +284,52 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		
 		return [InstructionJob(0, tid, ip, self.Nop, rsp)]
 
+	def OPLibCFGIns(self):
+		# Get the instruction
+		(ip, rsp, tid) = self.DumpInstruction()
+		dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
+		# No need to update the thread context here
+		return [BasicBlockJob(destination = dst, tid = tid, addr = ip, bytecode = self.project.loader.instruction_memory.load_instruction(ip), process=self.LibCFGIns)]
+
+	def LibCFGIns(self, job: BasicBlockJob):
+		tid = job.tid
+		dst = job.destination
+		irsb = self.LiftBasicBlock(job)
+		l.info(f"TID {tid}: LibCFGIns {hex(job.addr)} -> {hex(dst)}")
+		match irsb.jumpkind:
+			case 'Ijk_Call':
+				# It's a call from a library to a function in tracked binary
+				if self._current[tid].function is None:
+					self.init_thread(job.tid, block_head=job.addr, create_function=False)	
+				function = self.functions.function(dst, create=True)
+				# Set the current state
+				self._current[tid] = self.State(function=function)
+				# There is no necessity to fix the call stack, since returns to libs are skipped
+				pass
+			case 'Ijk_Boring':
+				# Only unconditional branches are processed, so this is for sure a jump to a function of \
+				# the tracked binary
+				# It's a call from a library to a function in tracked binary
+				if self._current[tid].function is None:
+					self.init_thread(job.tid, block_head=job.addr, create_function=False)	
+				function = self.functions.function(dst, create=True)
+				# Set the current state
+				self._current[tid] = self.State(function=function)
+				# There is no necessity to fix the call stack, since returns to libs are skipped
+				pass
+			case 'Ijk_Ret':
+				l.error(f'TID {tid}: unexpected Ijk_Ret in non tracked lib')
+				exit(-1)
+			case _:
+				raise NotImplementedError(f"TID {tid}: Unsupported jumpkind {irsb.jumpkind} in non tracked lib")
+
+
+			 
+
+
+
+
+
 
 	def OPControlFlowInstruction(self):
 
@@ -365,10 +415,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			sys.stderr.write("0x%x:\t%s\t%s\n" % (i.address, i.mnemonic, i.op_str))
 		sys.stderr.write("\n")
 
-	def init_thread(self, tid, block_head):
+	def init_thread(self, tid, block_head, create_function=True):
 		# Create the current function in the Function Manager
 		l.info(f"TID {tid}: Initializing thread func: {hex(block_head)}")
-		initial = self.functions.function(addr=block_head, create=True)
+		if create_function:
+			initial = self.functions.function(addr=block_head, create=True)
+		else:
+			initial = None
 
 		# create the self._current[tid] pair
 		self._current[tid] = self.State(function = initial, working = None)
@@ -512,13 +565,11 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		working : BasicBlock = self._current[tid].working
 		jumpkind = working._irsb.jumpkind
 		rip = working._irsb.instruction_addresses[-1]
-
 		def Ijk_Call(self, target, tid, job = None):			# Check if it's a call to a library function
 
 			return_address = working.addr + working.size
 
 			if self.should_target_be_tracked(target):
-
 				# Register the call site in the current function            
 				called = self.functions.function(target, create = True)
 
@@ -551,12 +602,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			jump_targets = set(filter(lambda x: not (working.addr <= x and x < working.addr + working.size), jump_targets))
 			assert len(jump_targets) <= 2, IPython.embed()
 			# herustic checks for call similarity
-			
-			# TODO: fix phantom nodes not created if not in pruned jumps
 
 			# 1. pruned jump check
 			if rip not in self.pruned_jumps:
-				
 				# Check it's not a jump stup to a library
 				if len(jump_targets) == 1:
 
@@ -628,21 +676,20 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 								self.pruned_jumps.add(rip)
 				
 			
-			if not outside:
-				for t in jump_targets:
-					if t != target:
-						assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
-						node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
+			for t in jump_targets:
+				if t != target:
+					assert len(self.model.get_all_nodes(addr = t, anyaddr = True)) <= 1
+					node : BasicBlock = self.model.get_any_node(t, anyaddr=True)
 
-						if node is not None:
-							assert isinstance(node, BasicBlock)
-							if not node.is_phantom and node.addr != t:
-								(_, node) = self.split_node(node, t, tid)
-						else:
-							node = BasicBlock(addr = t, is_phantom = True)
-							self.model.add_node(t, node)
+					if node is not None:
+						assert isinstance(node, BasicBlock)
+						if not node.is_phantom and node.addr != t:
+							(_, node) = self.split_node(node, t, tid)
+					else:
+						node = BasicBlock(addr = t, is_phantom = True)
+						self.model.add_node(t, node)
 
-						self._current[tid].function._transit_to(working, node)
+					self._current[tid].function._transit_to(working, node)
 
 
 		def Ijk_Nop(self, target, tid, job = None):

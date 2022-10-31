@@ -41,7 +41,7 @@ else:
 
 
 bytecode = os.path.join('dumps', args.test, 'bytecode.bin')
-trace = os.path.join('dumps', args.test, 'trace.json')
+trace = os.path.join('dumps', args.test, 'trace.bin')
 avoid = os.path.join('dumps', args.test, 'avoid.bin')
 
 if args.operating_system == 'Linux':
@@ -53,8 +53,7 @@ a = angr.project.load_trace(bytecode, 'x86_64')
 b = a.analyses.CFGInstrace(trace, avoid, OS = args.operating_system, plt_dump = plt)
 
 
-#IPython.embed()
-
+IPython.embed()
 
 
 with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:   
