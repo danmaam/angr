@@ -4,6 +4,7 @@ import logging
 import struct
 from collections import defaultdict
 import archinfo
+import IPython
 
 l = logging.getLogger(name=__name__)
 
@@ -42,8 +43,13 @@ class DynamicRecoveredInstructions(Backend):
 		super().__init__(*args, **kwargs)
 		#TODO: determine instruction size from opcode
 		#load into memory 
+
 		self.loader.instruction_memory = self.Memory()
 		self.loader.instruction_size = {}
+
+
+
+		print("begin of clemory backing")
 		"""
 		FILE FORMAT
 		[INSTRUCTION ADDRESS][INSTRUCTION SIZE][INSTRUCTION BYTECODE]
@@ -57,9 +63,18 @@ class DynamicRecoveredInstructions(Backend):
 			size = struct.unpack("<B", curr[8:9])[0]
 			
 			bytecode = self._binary_stream.read(size)
+			
+			try:
+				self.memory.store(insaddr, bytecode)
+			except:
+				self.memory.add_backer(insaddr, b'\x90' * 0xff, overwrite = True)
+				self.memory.store(insaddr, bytecode)
+
+
+
 
 			self._add_instruction(insaddr, bytecode)
-
+		print("end of clemory backing")
 	def _add_instruction(self, instruction_address, bytecode):
 		"""
 		Adds a bytecode instruction to the Clememory of the project

@@ -43,7 +43,7 @@ import archinfo
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('DEBUG'))
+l.setLevel(logging.getLevelName('WARNING'))
 
 
 #TODO: heuristics doesn't work well since stackpointer is took after returns and calls
@@ -291,6 +291,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		# No need to update the thread context here
 		return [BasicBlockJob(destination = dst, tid = tid, addr = ip, bytecode = self.project.loader.instruction_memory.load_instruction(ip), process=self.LibCFGIns)]
 
+
 	def LibCFGIns(self, job: BasicBlockJob):
 		tid = job.tid
 		dst = job.destination
@@ -322,14 +323,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 				exit(-1)
 			case _:
 				raise NotImplementedError(f"TID {tid}: Unsupported jumpkind {irsb.jumpkind} in non tracked lib")
-
-
-			 
-
-
-
-
-
 
 	def OPControlFlowInstruction(self):
 
