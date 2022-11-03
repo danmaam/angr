@@ -148,6 +148,8 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self.lift_cache = defaultdict(lambda: None)
 		self.pruned_jumps = set()       
 		self.OS = OS 
+
+	
 				
 
 
@@ -182,6 +184,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		}
 
 		self._state_stack = defaultdict(lambda: [])
+		self.project.loader.memory = self.project.loader.instruction_memory
 		self._analyze() 
 
 

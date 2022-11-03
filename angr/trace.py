@@ -63,15 +63,7 @@ class DynamicRecoveredInstructions(Backend):
 			size = struct.unpack("<B", curr[8:9])[0]
 			
 			bytecode = self._binary_stream.read(size)
-			
-			try:
-				self.memory.store(insaddr, bytecode)
-			except:
-				self.memory.add_backer(insaddr, b'\x90' * 0xff, overwrite = True)
-				self.memory.store(insaddr, bytecode)
-
-
-
+		
 
 			self._add_instruction(insaddr, bytecode)
 		print("end of clemory backing")
