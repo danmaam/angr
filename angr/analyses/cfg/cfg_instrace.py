@@ -18,6 +18,8 @@ from matplotlib.pyplot import pause
 import ipdb
 import IPython
 import re
+import multiprocessing.shared_memory
+from io import BytesIO
 
 from sympy import Q, false, true
 import angr
@@ -43,7 +45,7 @@ import archinfo
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('WARNING'))
+l.setLevel(logging.getLevelName('DEBUG'))
 
 
 #TODO: heuristics doesn't work well since stackpointer is took after returns and calls
@@ -146,11 +148,9 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self._current = defaultdict(lambda: self.State(function = None, working = None, sp = None))
 		self.perThreadContext = defaultdict(lambda: self.LiftingContext())
 		self.lift_cache = defaultdict(lambda: None)
-		self.pruned_jumps = set()       
+		self.pruned_jumps = set()
 		self.OS = OS 
 
-	
-				
 
 
 		self._ins_trace = open(trace, "rb")	
@@ -169,28 +169,27 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 					print(hex(start), hex(end))
 
 
-		self.avoided_addresses = {}
-		self.load_libraries(to_avoid_functions)
-
-
-		self._job_dispatcher = {b"\x01": self.ProcessNewBasicBlock, b"\x02": self.process_raised_signal, b"\x03": self.process_return_from_signal}
-
 		self._job_factory = {
 			b"\x00": self.OPNewInstruction,
 			b"\x01": self.OPControlFlowInstruction,
 			b"\x02": self.OPRaisedSignal,
 			b"\x03": self.OPReturnFromSignal,
-			b"\x04": self.OPLibCFGIns
+			b"\x04": self.OPLibCFGIns,
+			b"\x06": self.OPLoadBytecode,
+			b"\x0a": self.OPEndChunk
 		}
 
 		self._state_stack = defaultdict(lambda: [])
 		self.project.loader.memory = self.project.loader.instruction_memory
-		self._analyze() 
+
+		self.shm = multiprocessing.shared_memory.SharedMemory('shm-pinpacker', create = False)
+		self._analyze()
 
 
-
-
-
+	def _pre_analysis(self):
+		job = self.OPEndChunk()
+		for j in job:
+			self._insert_job(j)
 
 	def ProcessNewBasicBlock(self, job: BasicBlockJob):
 		tid = job.tid
@@ -216,8 +215,17 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def is_plt_plt_got(self, target):
 		return any(target >= start and target < end for start, end in self.plt_sections)
 	
-	def Nop(self, job: InstructionJob):
+	def Nop(self, job):
 		return
+
+	def OPEndChunk(self):
+		l.debug("Waiting for instructions in shm")
+		while self.shm.buf[0] != 8:
+			pass
+		self._ins_trace = BytesIO(self.shm.buf[1:])
+		self.shm.buf[0] = 5
+		return [NOPJob(0,0,0,self.Nop)]
+		
 
 	def LiftBasicBlock(self, job: BasicBlockJob):
 		head = job.addr
@@ -286,6 +294,21 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			return self.GenerateBasicBlockJob(rsp, tid)
 		
 		return [InstructionJob(0, tid, ip, self.Nop, rsp)]
+
+	def OPLoadBytecode(self):
+		curr = self._ins_trace.read(9)
+		insaddr = struct.unpack("<Q", curr[0:8])[0]
+		size = struct.unpack("<B", curr[8:9])[0]
+
+		bytecode = self._ins_trace.read(size)
+
+		self.project.loader.memory.store_instruction(insaddr, bytecode)
+
+		return [NOPJob(0,0,0,self.Nop)]
+
+	
+
+
 
 	def OPLibCFGIns(self):
 		# Get the instruction
@@ -395,14 +418,13 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self._callstack[tid] = CallStack(bottom=True)
 
 	def get_next_job(self):
-		while True:
-			opcode = self._ins_trace.read(1)
-			if opcode:				
-				job = self._job_factory[opcode]()
-				return job
-			else:
-				self._should_abort = True
-				return
+		opcode = self._ins_trace.read(1)
+		if opcode:				
+			job = self._job_factory[opcode]()
+			return job
+		else:
+			self._should_abort = True
+			return
 
 	def disasm(self, bytecode, block_head):
 		#FOR DEBUGGING PURPOSES
@@ -424,11 +446,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self._callstack[tid] = CallStack(bottom=True)
 
 
-	def _pre_analysis(self):
-		self._initialize_cfg()
-		job = self.get_next_job()
-		for j in job:
-			self._insert_job(j)
+
 
 
 	def _job_key(self, job):
