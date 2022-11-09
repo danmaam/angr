@@ -62,36 +62,36 @@ with open (os.path.join('dumps', args.test, 'edges.txt'), 'r') as f:
         command, params = x.split(':')
         match command:
             case "FUNCTION":
-                curr_func = b.functions.function(addr=int(params, 16))
-                assert curr_func is not None, f"{hex(int(params, 16))} not found"
+                curr_func = b.functions.function(addr=int(params, 16) + base_address)
+                assert curr_func is not None, f"{hex(int(params, 16) + base_address)} not found"
             case "CALLSITES":
                 for callsite in params.split(','):
-                    callsite = b.model.get_node(int(callsite, 16))
+                    callsite = b.model.get_node(int(callsite, 16) + base_address)
                     assert callsite is not None
                     assert callsite.addr in curr_func._call_sites.keys(), IPython.embed()
             case "RETSITES":
                 for retsite in params.split(','):
-                    retsite = b.model.get_node(int(retsite, 16))
+                    retsite = b.model.get_node(int(retsite, 16) + base_address)
                     assert retsite is not None
                     assert retsite in curr_func._ret_sites
             case "EDGES":
                 edges = [x.split('->') for x in params.split(',')]
                 for src, dst in edges:
                     
-                    src_int = int(src, 0x10)
-                    dst_int = int(dst, 0x10)
+                    src_int = int(src, 0x10) + base_address
+                    dst_int = int(dst, 0x10) + base_address
 
                     src_node = b.model.get_node(src_int)
                     dst_node = b.model.get_node(dst_int)
 
-                    assert src_node is not None, f"Node with address {hex(src_int)} not found"
-                    assert dst_node is not None, f"Node with address {hex(dst_int)} not found"
+                    assert src_node is not None, f"Node with address {hex(src_int) + base_address} not found"
+                    assert dst_node is not None, f"Node with address {hex(dst_int) + base_address} not found"
 
 
                     assert (src_node, dst_node) in curr_func.transition_graph.edges, IPython.embed()
             case "NONRETSITES":
                 for retsite in params.split(','):
-                    retsite = b.model.get_node(int(retsite, 16))
+                    retsite = b.model.get_node(int(retsite, 16) + base_address)
                     if retsite is not None:
                         assert retsite not in curr_func._ret_sites
 

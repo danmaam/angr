@@ -45,7 +45,7 @@ import archinfo
 
 logging.basicConfig(stream=sys.stdout)
 l = logging.getLogger(name=__name__)
-l.setLevel(logging.getLevelName('DEBUG'))
+l.setLevel(logging.getLevelName('WARNING'))
 
 
 #TODO: heuristics doesn't work well since stackpointer is took after returns and calls
@@ -74,19 +74,20 @@ class InstructionJob(CFGJob):
 
 class BasicBlockJob(CFGJob):
 	def __init__(self, destination: int, tid: int, addr: int, process, bytecode, start_sp: int = None, \
-				 exit_sp=None):
+				 exit_sp=None, isException=False):
 		super().__init__(destination, tid, addr, process)
 	 
 		self.bytecode = bytecode
 		self.entryRSP = start_sp
 		self.exitRSP = exit_sp
 		self.block_irsb = None
+		self.isException = isException
+
 
 class SignalJob(CFGJob):
 	def __init__(self, destination: int, tid: int, addr : int, process, signal_id : int = None):
 		super().__init__(destination, tid, addr, process)
 		self.signal_id = signal_id
-
 
 
 
@@ -112,17 +113,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			self.bytecode = b''
 			self.entryRSP = None
 			self.block_head = None
+			self.exceptionBegin = None
 
 
 	# Load the set of instructions that shouldn't be tracked
-	def load_libraries(self, x):
-		with open(x, "rb") as f:
-			content = f.read()
-			chunks = [content[t:t + 16] for t in range(0, len(content), 16)]
-			for c in chunks:
-				addr = struct.unpack('<q', c[:8])[0]
-				size = struct.unpack('<q', c[8:])[0]
-				self.avoided_addresses[addr] = addr + size
 
 	
 	def __init__(self, trace, to_avoid_functions, normalize=False, base_state=None, detect_tail_calls=False, low_priority=False, model=None, OS = 'Linux', plt_dump = None):
@@ -143,7 +137,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			model=model,
 		)
 
-
+		self.avoided_addresses = {}
 		self._callstack = defaultdict(lambda: None)
 		self._current = defaultdict(lambda: self.State(function = None, working = None, sp = None))
 		self.perThreadContext = defaultdict(lambda: self.LiftingContext())
@@ -152,8 +146,6 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		self.OS = OS 
 
 
-
-		self._ins_trace = open(trace, "rb")	
 		
 		if OS == 'Linux':
 			assert plt_dump is not None
@@ -174,16 +166,22 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 			b"\x01": self.OPControlFlowInstruction,
 			b"\x02": self.OPRaisedSignal,
 			b"\x03": self.OPReturnFromSignal,
-			b"\x04": self.OPLibCFGIns,
 			b"\x06": self.OPLoadBytecode,
-			b"\x0a": self.OPEndChunk
+			b"\x0a": self.OPEndChunk,
+			b"\x0b": self.OPLoadImage,
+			b"\x09": self.OPEnd,
+			b"\x0c": self.OPRaisedException,
 		}
 
 		self._state_stack = defaultdict(lambda: [])
+		self._exception_stack = defaultdict(lambda: [])
+		 
 		self.project.loader.memory = self.project.loader.instruction_memory
 
 		self.shm = multiprocessing.shared_memory.SharedMemory('shm-pinpacker', create = False)
 		self._analyze()
+
+
 
 
 	def _pre_analysis(self):
@@ -218,14 +216,42 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 	def Nop(self, job):
 		return
 
+	def OPRaisedException(self):
+		chunk = self._ins_trace.read(0x20)
+
+		# Get exception information
+		tid = struct.unpack('<I', chunk[:4])[0]
+		exceptionCode = struct.unpack('<Q', chunk[4:8])[0]
+		exceptionAddress = struct.unpack('<Q', chunk[8:16])[0]
+		exceptionDestination = struct.unpack('<Q', chunk[16:24])[0]
+		exceptionRSP = struct.unpack('<Q', chunk[24:32])[0]
+
+
+		# TODO: adapt process type for exceptions	
+		# Close the current processing basic block
+		job = self.GenerateBasicBlockJob(None, tid, None)
+
+		# Update current thread context
+		self.UpdateThreadContext(exceptionDestination, exceptionRSP, tid, exceptionBegin=True)
+
+		# Push the exception in the exception stack
+		self._exception_stack[tid].insert(0, job.addr)
+
+		return job 
+
+
 	def OPEndChunk(self):
 		l.debug("Waiting for instructions in shm")
 		while self.shm.buf[0] != 8:
 			pass
 		self._ins_trace = BytesIO(self.shm.buf[1:])
 		self.shm.buf[0] = 5
-		return [NOPJob(0,0,0,self.Nop)]
 		
+		return [NOPJob(0,0,0,self.Nop)]
+	
+	def OPEnd(self):
+		self._should_abort = True
+		return [NOPJob(0,0,0,self.Nop)]
 
 	def LiftBasicBlock(self, job: BasicBlockJob):
 		head = job.addr
@@ -274,10 +300,18 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		return (ip, rsp, tid)
 
-	def UpdateThreadContext(self, ip, rsp, tid):
+	def UpdateThreadContext(self, ip, rsp, tid, exceptionBegin=False):
 		self.perThreadContext[tid].entryRSP = rsp if self.perThreadContext[tid].entryRSP is None else self.perThreadContext[tid].entryRSP
 		self.perThreadContext[tid].block_head = ip if self.perThreadContext[tid].block_head is None else self.perThreadContext[tid].block_head		
 		self.perThreadContext[tid].bytecode += self.project.loader.instruction_memory.load_instruction(ip)
+		self.perThreadContext[tid].exceptionBegin = exceptionBegin if self.perThreadContext[tid].exceptionBegin is None else self.perThreadContext[tid].exceptionBegin
+
+	def OPLoadImage(self):
+		curr_chunk = self._ins_trace.read(16)
+		low = struct.unpack('<Q', curr_chunk[:8])[0]
+		high = struct.unpack('<Q', curr_chunk[8:16])[0]
+		self.avoided_addresses[low] = high
+		return [NOPJob(0,0,0,self.Nop)]
 
 	
 	def OPNewInstruction(self):
@@ -303,52 +337,10 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		bytecode = self._ins_trace.read(size)
 
 		self.project.loader.memory.store_instruction(insaddr, bytecode)
-
+		l.debug(f"Loaded shellcode at {hex(insaddr)}")
 		return [NOPJob(0,0,0,self.Nop)]
 
 	
-
-
-
-	def OPLibCFGIns(self):
-		# Get the instruction
-		(ip, rsp, tid) = self.DumpInstruction()
-		dst = struct.unpack('<Q', self._ins_trace.read(8))[0]
-		# No need to update the thread context here
-		return [BasicBlockJob(destination = dst, tid = tid, addr = ip, bytecode = self.project.loader.instruction_memory.load_instruction(ip), process=self.LibCFGIns)]
-
-
-	def LibCFGIns(self, job: BasicBlockJob):
-		tid = job.tid
-		dst = job.destination
-		irsb = self.LiftBasicBlock(job)
-		l.info(f"TID {tid}: LibCFGIns {hex(job.addr)} -> {hex(dst)}")
-		match irsb.jumpkind:
-			case 'Ijk_Call':
-				# It's a call from a library to a function in tracked binary
-				if self._current[tid].function is None:
-					self.init_thread(job.tid, block_head=job.addr, create_function=False)	
-				function = self.functions.function(dst, create=True)
-				# Set the current state
-				self._current[tid] = self.State(function=function)
-				# There is no necessity to fix the call stack, since returns to libs are skipped
-				pass
-			case 'Ijk_Boring':
-				# Only unconditional branches are processed, so this is for sure a jump to a function of \
-				# the tracked binary
-				# It's a call from a library to a function in tracked binary
-				if self._current[tid].function is None:
-					self.init_thread(job.tid, block_head=job.addr, create_function=False)	
-				function = self.functions.function(dst, create=True)
-				# Set the current state
-				self._current[tid] = self.State(function=function)
-				# There is no necessity to fix the call stack, since returns to libs are skipped
-				pass
-			case 'Ijk_Ret':
-				l.error(f'TID {tid}: unexpected Ijk_Ret in non tracked lib')
-				exit(-1)
-			case _:
-				raise NotImplementedError(f"TID {tid}: Unsupported jumpkind {irsb.jumpkind} in non tracked lib")
 
 	def OPControlFlowInstruction(self):
 
@@ -363,6 +355,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		head = self.perThreadContext[tid].block_head
 		bytecode = self.perThreadContext[tid].bytecode
+		isException = self.perThreadContext[tid].exceptionBegin
 
 		size = len(bytecode)
 		
@@ -376,7 +369,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		# Reset instruction context
 		self.perThreadContext[tid] = self.LiftingContext()
 
-		return [BasicBlockJob(destination = destination, tid = tid, addr = head, process = self.ProcessNewBasicBlock, bytecode = bytecode, start_sp = entryRSP, exit_sp = exitRSP)]
+		return [BasicBlockJob(destination = destination, tid = tid, addr = head, process = self.ProcessNewBasicBlock, bytecode = bytecode, start_sp = entryRSP, exit_sp = exitRSP, isException=isException)]
 
 
 	def OPRaisedSignal(self):
@@ -464,6 +457,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 		tid = job.tid
 		group : pyvex.IRSB = job.block_irsb
 		working : BasicBlock = self._current[tid].working
+		exception = job.isException
 			
 		if working is None:
 			self._current[tid].rsp_at_entrypoint = job.entryRSP
@@ -509,7 +503,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 		if not outside:
 			if working is not None:
-				self._current[tid].function._transit_to(working, node)
+				self._current[tid].function._transit_to(working, node, is_exception=exception)
 			else:
 				self._current[tid].function._register_nodes(True, node)
 
@@ -720,7 +714,7 @@ class CFGInstrace(ForwardAnalysis, CFGBase):
 
 			try:					
 				stack_top = copy(self._callstack[tid])
-				
+			
 				self._callstack[tid] = self._callstack[tid].pop()
 
 				# restore status after return
